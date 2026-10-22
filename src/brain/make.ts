@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { readConnectors, writeConnectors, type ConnectorConfig } from '../config.js'
 import { VAULT_PLACEHOLDER } from '../vault.js'
-import { checkModule, makeLoop, type BrainModel, type Made, type Permit, type Tester, type TestReport } from './loop.js'
+import { checkModule, makeLoop, type BrainModel, type Broken, type Made, type Permit, type Tester, type TestReport } from './loop.js'
 
 /**
  * Making a way, on this machine: staging a written connector, testing it in the sandbox, and
@@ -101,7 +101,7 @@ export async function installStaged(id: string, permit: Permit, home: string): P
   await rm(join(home, 'made', id), { recursive: true, force: true })
   // The keys it declared are filled from the vault when it starts (hyperlink secret set <name> <key>).
   const env = Object.fromEntries(permit.secrets.map(secret => [`HYPERLINK_SECRET_${secret.toUpperCase()}`, VAULT_PLACEHOLDER]))
-  const config: ConnectorConfig & { made: true; reaches: readonly string[] } = { name, ...sandboxCommand(target), ...(permit.secrets.length ? { env } : {}), made: true, reaches: permit.reaches }
+  const config: MadeConfig = { name, ...sandboxCommand(target), ...(permit.secrets.length ? { env } : {}), made: true, reaches: permit.reaches, permit: keptPermit(permit) }
   await writeConnectors([...existing, config], home)
   return config
 }
@@ -120,4 +120,47 @@ export async function readDocs(url: string): Promise<string> {
   if (!response.ok) throw new Error(`${response.status}`)
   const html = await response.text()
   return html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/giu, ' ').replace(/<[^>]+>/gu, ' ').replace(/&nbsp;/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, DOCS_CHARS)
+}
+
+/** A made connector's list entry: where it runs, and the permit he approved (what a repair is held to). */
+export type MadeConfig = ConnectorConfig & { readonly made: true; readonly reaches: readonly string[]; readonly permit?: Pick<Permit, 'reaches' | 'secrets' | 'tools'>; readonly repairedAt?: string }
+
+function keptPermit(permit: Permit): Pick<Permit, 'reaches' | 'secrets' | 'tools'> {
+  return { reaches: permit.reaches, secrets: permit.secrets, tools: permit.tools.map(tool => ({ name: tool.name, description: tool.description, changes: tool.changes })) }
+}
+
+/** A made connector's file: the last argument of its sandbox command. */
+function fileOf(config: ConnectorConfig): string {
+  const file = config.args?.at(-1)
+  if (!file?.endsWith('connector.ts')) throw new Error(`${config.name} was not made by Hyperlink, so it cannot be repaired from its code.`)
+  return file
+}
+
+/** A made connector as its repair sees it: its code, its approved permit, and what went wrong. */
+export async function brokenConnector(name: string, home: string, evidence: { readonly problem: string | null; readonly errors: readonly string[] } | null): Promise<{ readonly broken: Broken; readonly permit: Pick<Permit, 'reaches' | 'secrets' | 'tools'> }> {
+  const config = (await readConnectors(home)).find(entry => entry.name === name) as MadeConfig | undefined
+  if (!config) throw new Error(`There is no connector named ${name}.`)
+  if (config.made !== true) throw new Error(`${name} was not made by Hyperlink, so it cannot be repaired from its code.`)
+  const code = await readFile(fileOf(config), 'utf8')
+  // An entry from before permits were kept: its hosts are known, and no tool is taken to change anything.
+  const permit = config.permit ?? { reaches: config.reaches ?? [], secrets: [], tools: [] }
+  return { broken: { name, code, problem: evidence?.problem ?? null, errors: evidence?.errors ?? [] }, permit }
+}
+
+/** The repaired code takes the place of the old, which is kept beside it (connector.ts.previous). */
+export async function replaceConnector(name: string, id: string, permit: Permit, home: string): Promise<MadeConfig> {
+  if (!/^[a-f0-9]{12}$/u.test(id)) throw new Error('There is no such staged connector.')
+  const connectors = await readConnectors(home)
+  const config = connectors.find(entry => entry.name === name) as MadeConfig | undefined
+  if (!config || config.made !== true) throw new Error(`${name} is not a connector Hyperlink made.`)
+  const file = fileOf(config)
+  await copyFile(file, `${file}.previous`)
+  await rename(stagedFile(home, id), file)
+  await rm(join(home, 'made', id), { recursive: true, force: true })
+  const slot = (secret: string) => `HYPERLINK_SECRET_${secret.toUpperCase()}`
+  const env = { ...config.env, ...Object.fromEntries(permit.secrets.map(secret => [slot(secret), config.env?.[slot(secret)] ?? VAULT_PLACEHOLDER])) }
+  // repairedAt changes the entry, so a running Hyperlink starts it again with the new code.
+  const next: MadeConfig = { ...config, ...(Object.keys(env).length ? { env } : {}), reaches: permit.reaches, permit: keptPermit(permit), repairedAt: new Date().toISOString() }
+  await writeConnectors(connectors.map(entry => entry.name === name ? next : entry), home)
+  return next
 }

@@ -5,8 +5,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Hub } from './hub.js'
 import { statusPage } from './page.js'
-import { installStaged, localTester } from './brain/make.js'
-import type { Permit } from './brain/loop.js'
+import { brokenConnector, installStaged, localTester, replaceConnector } from './brain/make.js'
+import { widening, type Permit } from './brain/loop.js'
 import { readConnectors, writeConnectors } from './config.js'
 import { secretSlot, VAULT_PLACEHOLDER, type Vault } from './vault.js'
 
@@ -21,13 +21,15 @@ const MAX_CODE_CHARS = 200_000
  *   /api/activity  recent calls: what, how long, whether it worked; never their contents
  *   /api/make/test     a connector an agent's brain wrote: refused, or staged and tested in the sandbox
  *   /api/make/install  a staged connector that passed, added to the list (the agent asked its owner first)
+ *   /api/make/broken   a made connector that stopped working: its code, approved permit, and what went wrong
+ *   /api/make/replace  a tested repair takes its place (the old kept beside it); one that needs more than its permit needs approved
  *   /api/secrets       keep a connector's key in the vault (POST), or list the names kept (GET); values never come back
  *   /            the status page
  *
  * Every request must name this host (so a web page cannot reach it by DNS rebinding), and every
  * call to /mcp or /api must carry the token. A browser page from another site is refused.
  */
-export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string; readonly vault?: Vault | null }): Promise<HttpServer> {
+export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string; readonly vault?: Vault | null; readonly listChanged?: () => Promise<void> }): Promise<HttpServer> {
   const { hub, token, port, home } = options
   const vault = options.vault ?? null
   const tester = localTester(home)
@@ -70,7 +72,32 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
       if (!permit || typeof body?.id !== 'string') return send(res, 404, { error: 'No staged connector that passed its tests has that id.' })
       passed.delete(body.id)
       const config = await installStaged(body.id, permit, home)
+      // Answered once it runs, so the agent's next call finds it.
+      await options.listChanged?.()
       return send(res, 200, { name: config.name })
+    }
+    if (url.pathname === '/api/make/broken' && req.method === 'GET') {
+      const name = url.searchParams.get('name') ?? ''
+      try {
+        return send(res, 200, await brokenConnector(name, home, hub.evidence(name)))
+      } catch (error) {
+        return send(res, 404, { error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    if (url.pathname === '/api/make/replace' && req.method === 'POST') {
+      const body = await readJson(req) as { name?: unknown; id?: unknown; approved?: unknown } | undefined
+      const permit = typeof body?.id === 'string' ? passed.get(body.id) : undefined
+      if (!permit || typeof body?.id !== 'string' || typeof body.name !== 'string') return send(res, 404, { error: 'No staged repair that passed its tests has that id.' })
+      const before = await brokenConnector(body.name, home, null).catch(() => null)
+      if (!before) return send(res, 404, { error: `${body.name} is not a connector Hyperlink made.` })
+      // A repair that needs no more than he approved goes in; one that needs more waits for his yes.
+      const wider = widening(before.permit, permit)
+      if (wider.length > 0 && body.approved !== true) return send(res, 409, { needsApproval: true, widening: wider })
+      passed.delete(body.id)
+      await replaceConnector(body.name, body.id, permit, home)
+      // Answered once the new code runs: a call right after a repair must not land on the old one.
+      await options.listChanged?.()
+      return send(res, 200, { name: body.name, widened: wider })
     }
     if (url.pathname === '/api/secrets') {
       if (!vault) return send(res, 503, { error: 'The vault is closed on this machine, so no key can be kept.' })
