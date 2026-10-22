@@ -3,6 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
 import type { ConnectorConfig } from './config.js'
+import { looksSecret, VAULT_PLACEHOLDER, type Secrets } from './vault.js'
 
 /** Between a connector's name and its tool's: "chrome__browser_navigate". */
 export const SEPARATOR = '__'
@@ -46,6 +47,9 @@ export class Hub {
   private readonly connectors = new Map<string, Running>()
   private readonly activity: ActivityEntry[] = []
 
+  /** secrets: the vault, read when a connector starts; each gets its own keys and no one else's. */
+  constructor(private readonly secrets: () => Promise<Secrets> = async () => ({})) {}
+
   async start(configs: readonly ConnectorConfig[]): Promise<void> {
     await Promise.all(configs.map(config => this.add(config)))
   }
@@ -57,9 +61,16 @@ export class Hub {
     if (config.disabled) return
     const client = new Client({ name: 'hyperlink', version: '0.1.0' })
     try {
+      const own = (await this.secrets())[config.name] ?? {}
+      const fill = (values: Readonly<Record<string, string>> | undefined) => Object.fromEntries(Object.entries(values ?? {}).map(([name, value]) => {
+        if (value !== VAULT_PLACEHOLDER) return [name, value]
+        const kept = own[name]
+        if (kept === undefined) throw new Error(`it needs the secret ${name}: hyperlink secret set ${config.name} ${name}`)
+        return [name, kept]
+      }))
       const transport = config.url
-        ? new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: { ...config.headers } } })
-        : new StdioClientTransport({ command: config.command!, args: [...(config.args ?? [])], env: { ...processEnv(), ...config.env }, ...(config.cwd ? { cwd: config.cwd } : {}), stderr: 'pipe' })
+        ? new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: fill(config.headers) } })
+        : new StdioClientTransport({ command: config.command!, args: [...(config.args ?? [])], env: { ...processEnv(), ...fill(config.env) }, ...(config.cwd ? { cwd: config.cwd } : {}), stderr: 'pipe' })
       await withTimeout(client.connect(transport), START_TIMEOUT_MS, `${config.name} did not start within ${START_TIMEOUT_MS / 1000} s`)
       const listed = await client.listTools()
       const allowed = config.allow ? new Set(config.allow) : null
@@ -135,9 +146,9 @@ export class Hub {
   }
 }
 
-/** The environment a connector starts with: this process's, with the strings only. */
+/** The environment a connector starts with: this process's, without any key in it (a connector gets only its own). */
 function processEnv(): Record<string, string> {
-  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && !looksSecret(entry[0]) && !/^(HYPERLINK|FREYA)_/u.test(entry[0])))
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
