@@ -29,7 +29,7 @@ const MAX_CODE_CHARS = 200_000
  * Every request must name this host (so a web page cannot reach it by DNS rebinding), and every
  * call to /mcp or /api must carry the token. A browser page from another site is refused.
  */
-export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string; readonly vault?: Vault | null }): Promise<HttpServer> {
+export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string; readonly vault?: Vault | null; readonly listChanged?: () => Promise<void> }): Promise<HttpServer> {
   const { hub, token, port, home } = options
   const vault = options.vault ?? null
   const tester = localTester(home)
@@ -72,6 +72,8 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
       if (!permit || typeof body?.id !== 'string') return send(res, 404, { error: 'No staged connector that passed its tests has that id.' })
       passed.delete(body.id)
       const config = await installStaged(body.id, permit, home)
+      // Answered once it runs, so the agent's next call finds it.
+      await options.listChanged?.()
       return send(res, 200, { name: config.name })
     }
     if (url.pathname === '/api/make/broken' && req.method === 'GET') {
@@ -93,6 +95,8 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
       if (wider.length > 0 && body.approved !== true) return send(res, 409, { needsApproval: true, widening: wider })
       passed.delete(body.id)
       await replaceConnector(body.name, body.id, permit, home)
+      // Answered once the new code runs: a call right after a repair must not land on the old one.
+      await options.listChanged?.()
       return send(res, 200, { name: body.name, widened: wider })
     }
     if (url.pathname === '/api/secrets') {

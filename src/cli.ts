@@ -66,7 +66,8 @@ async function start(args: string[]): Promise<void> {
   }
   const hub = new Hub(async () => vault ? vault.read() : {})
   await hub.start(await readList())
-  const server = await startServer({ hub, token, port, home, vault })
+  // The list changed by the server (a connector installed or repaired): taken in at once, before it answers.
+  const server = await startServer({ hub, token, port, home, vault, listChanged: () => reconcile() })
   if (vault) console.log(`[hyperlink] the vault is open (its key kept by ${vault.protectedBy})`)
   const url = `http://127.0.0.1:${port}`
   // Where a caller on this machine finds a running Hyperlink.
@@ -76,7 +77,10 @@ async function start(args: string[]): Promise<void> {
 
   // The list is watched: a connector added or removed while it runs starts or stops at once.
   let pending: NodeJS.Timeout | undefined
-  const reconcile = async () => {
+  // One at a time: the server and the watcher can both ask at once, and each must see the last one's work.
+  let reconciling: Promise<void> = Promise.resolve()
+  const reconcile = (): Promise<void> => (reconciling = reconciling.catch(() => {}).then(reconcileNow))
+  const reconcileNow = async () => {
     const wanted = await readList().catch(() => null)
     if (!wanted) return
     const current = new Map(hub.status().map(entry => [entry.name, entry]))
