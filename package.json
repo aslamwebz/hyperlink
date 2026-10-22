@@ -1,0 +1,45 @@
+{
+  "name": "hyperlink-mcp",
+  "version": "0.1.0",
+  "description": "The hyperlink connected every page on the web. Hyperlink connects every app: one MCP server in front of all your MCP servers, for any agent.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hyperlink": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/cli.js start"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gateway",
+    "agents",
+    "ai",
+    "integration"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aslamwebz/hyperlink.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}
