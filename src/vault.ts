@@ -126,10 +126,14 @@ export class Vault {
   async read(): Promise<Secrets> {
     let raw: Buffer
     try { raw = await readFile(this.file) } catch { return {} }
-    const decipher = createDecipheriv('aes-256-gcm', this.key, raw.subarray(0, 12))
-    decipher.setAAD(Buffer.from(AAD))
-    decipher.setAuthTag(raw.subarray(12, 28))
-    return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8')) as Secrets
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this.key, raw.subarray(0, 12))
+      decipher.setAAD(Buffer.from(AAD))
+      decipher.setAuthTag(raw.subarray(12, 28))
+      return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8')) as Secrets
+    } catch {
+      throw new Error(`The vault does not open with this key (a different password, or a vault made for another user or machine). It is left as it is in ${this.file}.`)
+    }
   }
 
   private async write(secrets: Secrets): Promise<void> {
