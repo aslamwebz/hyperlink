@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { DEFAULT_PORT, hyperlinkHome, readConnectors, readOrMakeToken, validName, writeConnectors, type ConnectorConfig } from './config.js'
 import { Hub } from './hub.js'
 import { startServer } from './server.js'
+import { createInterface } from 'node:readline/promises'
+import { installConnector, makeConnector, type Permit, type TestReport } from './brain/make.js'
+import { modelFromEnv } from './brain/model.js'
 
 const USAGE = `hyperlink — one MCP server in front of all your MCP servers
 
@@ -14,6 +17,7 @@ const USAGE = `hyperlink — one MCP server in front of all your MCP servers
   hyperlink remove <name>                     remove a connector
   hyperlink list                              the connectors in the list
   hyperlink status                            ask a running Hyperlink how its connectors are
+  hyperlink make "<what>" [--docs <url>] [--yes]  the brain writes a connector, tests it, and asks you
 
   Agents connect to http://127.0.0.1:<port>/mcp with "Authorization: Bearer <token>";
   the token is in ${join('<HYPERLINK_HOME>', 'token')} (HYPERLINK_HOME is ~/.hyperlink unless set).`
@@ -26,6 +30,9 @@ async function main(argv: string[]): Promise<void> {
     case 'remove': return remove(rest)
     case 'list': return list()
     case 'status': return status()
+    case 'make': return make(rest)
+    // Internal: how a made connector runs, inside the sandbox.
+    case 'connector': return (await import('./kit.js')).runConnector(rest[0] ?? '')
     default:
       console.log(USAGE)
       if (command && command !== 'help' && command !== '--help') process.exitCode = 2
@@ -121,6 +128,49 @@ async function status(): Promise<void> {
   const body = await response.json() as { connectors: { name: string; state: string; tools: number; problem: string | null }[]; tools: number }
   console.log(`${endpoint.url} · ${body.connectors.length} connectors · ${body.tools} tools`)
   for (const entry of body.connectors) console.log(`  ${entry.name}: ${entry.state}${entry.problem ? ` (${entry.problem})` : ` · ${entry.tools} tools`}`)
+}
+
+async function make(args: string[]): Promise<void> {
+  const docs = option(args, '--docs')
+  const yes = args.includes('--yes')
+  const request = args.filter((arg, index) => !arg.startsWith('--') && args[index - 1] !== '--docs').join(' ').trim()
+  if (!request) return fail('Say what to connect, e.g. hyperlink make "Wikipedia: search articles and read a summary"')
+  const home = hyperlinkHome()
+  const model = modelFromEnv()
+  console.log(`Making a connector for: ${request}  (brain: ${model.name})`)
+  const started = Date.now()
+  const made = await makeConnector(request, { model, home, ...(docs ? { docsUrl: docs } : {}), log: line => console.log(`  ${line}`) })
+  const seconds = Math.round((Date.now() - started) / 1000)
+  console.log(`  ${made.attempts} tr${made.attempts === 1 ? 'y' : 'ies'}, ${seconds} s, ${made.tokens.input + made.tokens.output} tokens`)
+  if (!made.ok || !made.file || !made.report?.permit) {
+    if (made.report) printReport(made.report)
+    return fail(`It could not be made: ${made.problem ?? 'no connector came back'}${made.file ? ` (the last try is in ${made.file})` : ''}`)
+  }
+  printCard(made.report.permit, made.report)
+  if (!yes) {
+    const answer = await createInterface({ input: process.stdin, output: process.stdout }).question('Add it? [y/N] ')
+    if (!/^y(es)?$/iu.test(answer.trim())) return console.log(`Not added. It is kept in ${made.file}`)
+  }
+  const config = await installConnector({ file: made.file, permit: made.report.permit }, home)
+  console.log(`Added ${config.name}. A running Hyperlink starts it now; its tools are ${config.name}__<tool>.`)
+  process.exit(0)
+}
+
+/** The permit card: what it is, what it can reach, what it may change, and how its test went. */
+function printCard(permit: Permit, report: TestReport): void {
+  console.log('')
+  console.log(`  ┌ ${permit.name}: ${permit.description}`)
+  console.log(`  │ reaches   ${permit.reaches.join(', ') || 'nothing'}`)
+  if (permit.secrets.length) console.log(`  │ needs     ${permit.secrets.join(', ')} (set HYPERLINK_SECRET_<NAME>)`)
+  for (const tool of permit.tools) console.log(`  │ ${tool.changes ? 'changes' : 'reads  '}   ${tool.name}: ${tool.description.slice(0, 90)}`)
+  printReport(report, '  │ ')
+  console.log('  └ runs in its own process: no files but its own, no programs, network only to the hosts above')
+  console.log('')
+}
+
+function printReport(report: TestReport, prefix = '  '): void {
+  for (const test of report.tests) console.log(`${prefix}tested    ${test.tool}: ${test.ok ? 'ok' : 'failed'} in ${test.ms} ms${test.ok ? `, ${test.chars} characters` : ` (${test.error ?? ''})`}`)
+  if (report.problem) console.log(`${prefix}problem   ${report.problem.split('\n')[0]}`)
 }
 
 function option(args: readonly string[], name: string): string | undefined {
