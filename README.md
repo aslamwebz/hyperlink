@@ -47,10 +47,21 @@ Add it? [y/N]
 
 The brain is any OpenAI-compatible model; MiniMax M3.1 Flash by default (`HYPERLINK_MODEL_URL`, `HYPERLINK_MODEL`, `HYPERLINK_MODEL_KEY`). It wakes only to make or repair: a working connector runs with no AI at all. Point it at an API's docs with `--docs <url>`.
 
+## The vault: keys sealed, each connector gets only its own
+
+```sh
+hyperlink secret set github GITHUB_TOKEN    # asked for hidden (or piped in), never on the command line
+hyperlink secret list                       # names only; values are never shown
+```
+
+- **Sealed at rest.** Keys live in `vault.enc` (AES-256-GCM). Its key is kept by the operating system: Windows DPAPI, the macOS Keychain, or the Secret Service on Linux; on a server, `HYPERLINK_VAULT_PASSWORD`. Where none of those is there, Hyperlink keeps nothing rather than keep it in plain text.
+- **Nothing secret in the list.** `connectors.json` holds a `<vault>` placeholder where a key goes. A key written there in plain text (by hand, or by an app that installed a server) is moved into the vault as soon as Hyperlink sees it.
+- **Each connector gets its own keys and no one else's,** when it starts; nothing it inherits from Hyperlink's environment looks like a key. Change a key and the connector starts again with it.
+- **The brain never sees a secret.** A made connector declares the keys it needs; they reach it at run time, never its code.
+
 ## Where it is going
 
 - **Links:** "when this happens in A, do that in B", planned by the brain from a sentence, then running with no AI at all.
-- **A vault:** keys encrypted at rest; the brain never sees a secret.
 - **The map:** your apps around the brain, links lit as data flows.
 
 ## Use it
@@ -72,6 +83,9 @@ Point any MCP client at `http://127.0.0.1:7466/mcp` with the header `Authorizati
 | `hyperlink list` | the connectors in the list |
 | `hyperlink status` | how a running Hyperlink's connectors are |
 | `hyperlink make "<what>" [--docs <url>] [--yes]` | the brain writes a connector, tests it, asks you |
+| `hyperlink secret set <connector> <NAME>` | keep a key in the vault |
+| `hyperlink secret list [connector]` | the keys kept (names only) |
+| `hyperlink secret remove <connector> <NAME>` | forget one |
 
 ## Built with
 

@@ -7,6 +7,8 @@ import type { Hub } from './hub.js'
 import { statusPage } from './page.js'
 import { installStaged, localTester } from './brain/make.js'
 import type { Permit } from './brain/loop.js'
+import { readConnectors, writeConnectors } from './config.js'
+import { secretSlot, VAULT_PLACEHOLDER, type Vault } from './vault.js'
 
 const MAX_BODY_BYTES = 4_000_000
 const MAX_CODE_CHARS = 200_000
@@ -19,13 +21,15 @@ const MAX_CODE_CHARS = 200_000
  *   /api/activity  recent calls: what, how long, whether it worked; never their contents
  *   /api/make/test     a connector an agent's brain wrote: refused, or staged and tested in the sandbox
  *   /api/make/install  a staged connector that passed, added to the list (the agent asked its owner first)
+ *   /api/secrets       keep a connector's key in the vault (POST), or list the names kept (GET); values never come back
  *   /            the status page
  *
  * Every request must name this host (so a web page cannot reach it by DNS rebinding), and every
  * call to /mcp or /api must carry the token. A browser page from another site is refused.
  */
-export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string }): Promise<HttpServer> {
+export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string; readonly vault?: Vault | null }): Promise<HttpServer> {
   const { hub, token, port, home } = options
+  const vault = options.vault ?? null
   const tester = localTester(home)
   /** Staged connectors that passed, by id, with the permit they showed: only these can be installed. */
   const passed = new Map<string, Permit>()
@@ -67,6 +71,20 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
       passed.delete(body.id)
       const config = await installStaged(body.id, permit, home)
       return send(res, 200, { name: config.name })
+    }
+    if (url.pathname === '/api/secrets') {
+      if (!vault) return send(res, 503, { error: 'The vault is closed on this machine, so no key can be kept.' })
+      if (req.method === 'GET') return send(res, 200, { names: await vault.names() })
+      if (req.method !== 'POST') return send(res, 405, { error: 'GET or POST.' })
+      const body = await readJson(req) as { connector?: unknown; name?: unknown; value?: unknown } | undefined
+      if (typeof body?.connector !== 'string' || typeof body.name !== 'string' || typeof body.value !== 'string' || !body.value || body.value.length > 20_000) return send(res, 400, { error: 'Send connector, name and value.' })
+      const connectors = await readConnectors(home)
+      const config = connectors.find(entry => entry.name === body.connector)
+      if (!config) return send(res, 404, { error: `There is no connector named ${body.connector}.` })
+      const slot = secretSlot(config, body.name)
+      await vault.set(config.name, slot.key, body.value)
+      if (config[slot.place]?.[slot.key] !== VAULT_PLACEHOLDER) await writeConnectors(connectors.map(entry => entry.name === config.name ? { ...config, [slot.place]: { ...config[slot.place], [slot.key]: VAULT_PLACEHOLDER } } : entry), home)
+      return send(res, 200, { kept: slot.key })
     }
     if (url.pathname === '/mcp') {
       if (req.method !== 'POST') return send(res, 405, { error: 'Hyperlink takes MCP requests as POST.' })

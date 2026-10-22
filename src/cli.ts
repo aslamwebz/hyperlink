@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline/promises'
 import { installStaged, makeConnector } from './brain/make.js'
 import type { Permit, TestReport } from './brain/loop.js'
 import { modelFromEnv } from './brain/model.js'
+import { moveSecretsIntoVault, secretSlot, Vault, VAULT_PLACEHOLDER } from './vault.js'
 
 const USAGE = `hyperlink — one MCP server in front of all your MCP servers
 
@@ -19,6 +20,9 @@ const USAGE = `hyperlink — one MCP server in front of all your MCP servers
   hyperlink list                              the connectors in the list
   hyperlink status                            ask a running Hyperlink how its connectors are
   hyperlink make "<what>" [--docs <url>] [--yes]  the brain writes a connector, tests it, and asks you
+  hyperlink secret set <connector> <NAME>     keep a key in the vault (asked for, never on the command line)
+  hyperlink secret list [connector]           the keys kept (names only)
+  hyperlink secret remove <connector> <NAME>  forget one
 
   Agents connect to http://127.0.0.1:<port>/mcp with "Authorization: Bearer <token>";
   the token is in ${join('<HYPERLINK_HOME>', 'token')} (HYPERLINK_HOME is ~/.hyperlink unless set).`
@@ -32,6 +36,7 @@ async function main(argv: string[]): Promise<void> {
     case 'list': return list()
     case 'status': return status()
     case 'make': return make(rest)
+    case 'secret': return secret(rest)
     // Internal: how a made connector runs, inside the sandbox.
     case 'connector': return (await import('./kit.js')).runConnector(rest[0] ?? '')
     default:
@@ -44,9 +49,23 @@ async function start(args: string[]): Promise<void> {
   const home = hyperlinkHome()
   const port = Number(option(args, '--port') ?? process.env.HYPERLINK_PORT ?? DEFAULT_PORT)
   const token = await readOrMakeToken(home)
-  const hub = new Hub()
-  await hub.start(await readConnectors(home))
-  const server = await startServer({ hub, token, port, home })
+  // The vault: without it, a connector that needs a key does not start (nothing is kept in plain text instead).
+  const vault = await Vault.open(home).catch(error => { console.error(`[hyperlink] the vault is closed: ${error instanceof Error ? error.message : String(error)}`); return null })
+  /** The list as it should run: any key written in plain text moved into the vault first. */
+  const readList = async () => {
+    const read = await readConnectors(home)
+    if (!vault) return read
+    const { configs, moved } = await moveSecretsIntoVault(read, vault)
+    if (moved > 0) {
+      await writeConnectors(configs, home)
+      console.log(`[hyperlink] moved ${moved} key(s) from the connector list into the vault`)
+    }
+    return configs
+  }
+  const hub = new Hub(async () => vault ? vault.read() : {})
+  await hub.start(await readList())
+  const server = await startServer({ hub, token, port, home, vault })
+  if (vault) console.log(`[hyperlink] the vault is open (its key kept by ${vault.protectedBy})`)
   const url = `http://127.0.0.1:${port}`
   // Where a caller on this machine finds a running Hyperlink.
   await writeFile(join(home, 'endpoint.json'), JSON.stringify({ url, mcp: `${url}/mcp`, pid: process.pid }, null, 2), 'utf8')
@@ -56,7 +75,7 @@ async function start(args: string[]): Promise<void> {
   // The list is watched: a connector added or removed while it runs starts or stops at once.
   let pending: NodeJS.Timeout | undefined
   const reconcile = async () => {
-    const wanted = await readConnectors(home).catch(() => null)
+    const wanted = await readList().catch(() => null)
     if (!wanted) return
     const current = new Map(hub.status().map(entry => [entry.name, entry]))
     for (const name of current.keys()) if (!wanted.some(config => config.name === name)) { await hub.remove(name); console.log(`[hyperlink] ${name}: removed`) }
@@ -70,7 +89,18 @@ async function start(args: string[]): Promise<void> {
   }
   let configs = new Map((await readConnectors(home)).map(config => [config.name, JSON.stringify(config)]))
   await mkdir(home, { recursive: true })
+  // A key set or changed in the vault: the connectors that use one start again with it.
+  let pendingKeys: NodeJS.Timeout | undefined
+  const rekey = async () => {
+    for (const config of await readConnectors(home).catch(() => [] as ConnectorConfig[])) {
+      if (![...Object.values(config.env ?? {}), ...Object.values(config.headers ?? {})].includes(VAULT_PLACEHOLDER)) continue
+      await hub.add(config)
+      const entry = hub.status().find(item => item.name === config.name)
+      console.log(`[hyperlink] ${config.name}: ${entry?.state} with its keys${entry?.problem ? ` (${entry.problem})` : ''}`)
+    }
+  }
   const watcher = watch(home, (_event, file) => {
+    if (file === 'vault.enc') { clearTimeout(pendingKeys); pendingKeys = setTimeout(() => { void rekey() }, 300); return }
     if (file !== 'connectors.json') return
     clearTimeout(pending)
     pending = setTimeout(() => { void reconcile() }, 300)
@@ -172,6 +202,62 @@ function printCard(permit: Permit, report: TestReport): void {
 function printReport(report: TestReport, prefix = '  '): void {
   for (const test of report.tests) console.log(`${prefix}tested    ${test.tool}: ${test.ok ? 'ok' : 'failed'} in ${test.ms} ms${test.ok ? `, ${test.chars} characters` : ` (${test.error ?? ''})`}`)
   if (report.problem) console.log(`${prefix}problem   ${report.problem.split('\n')[0]}`)
+}
+
+/** hyperlink secret set|list|remove: keys into and out of the vault; a value is never on the command line. */
+async function secret(args: string[]): Promise<void> {
+  const [action, connector, name] = args
+  const home = hyperlinkHome()
+  const vault = await Vault.open(home).catch(error => fail(error instanceof Error ? error.message : String(error)))
+  if (action === 'list') {
+    const names = await vault.names()
+    const shown = Object.entries(names).filter(([entry]) => !connector || entry === connector)
+    if (shown.length === 0) return console.log(`No keys in the vault${connector ? ` for ${connector}` : ''}.`)
+    for (const [entry, keys] of shown) console.log(`${entry}: ${keys.join(', ') || '(none)'}`)
+    return console.log(`(the vault's key is kept by ${vault.protectedBy}; values are never shown)`)
+  }
+  if ((action !== 'set' && action !== 'remove') || !connector || !name) return fail('Use: hyperlink secret set <connector> <NAME>, hyperlink secret remove <connector> <NAME>, or hyperlink secret list [connector]')
+  const connectors = await readConnectors(home)
+  const config = connectors.find(entry => entry.name === connector)
+  if (!config) return fail(`There is no connector named "${connector}".`)
+  const slot = secretSlot(config, name)
+  if (action === 'remove') {
+    console.log(await vault.remove(connector, slot.key) ? `Removed ${slot.key} for ${connector}.` : `${connector} has no ${slot.key} in the vault.`)
+    return
+  }
+  const value = await readHidden(`${slot.key} for ${connector}: `)
+  if (!value) return fail('Nothing was given, so nothing changed.')
+  await vault.set(connector, slot.key, value)
+  // The list names where the key goes; its value stays in the vault.
+  if (config[slot.place]?.[slot.key] !== VAULT_PLACEHOLDER) {
+    const next = { ...config, [slot.place]: { ...config[slot.place], [slot.key]: VAULT_PLACEHOLDER } }
+    await writeConnectors(connectors.map(entry => entry.name === connector ? next : entry), home)
+  }
+  console.log(`Kept ${slot.key} for ${connector} in the vault. A running Hyperlink starts ${connector} again with it.`)
+}
+
+/** A line read without showing it (or the whole of stdin, when it is piped in). */
+async function readHidden(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    const chunks: Buffer[] = []
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
+    return Buffer.concat(chunks).toString('utf8').trim()
+  }
+  process.stdout.write(prompt)
+  return new Promise(done => {
+    let value = ''
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString('utf8')) {
+        if (char === '\r' || char === '\n') { process.stdin.setRawMode(false); process.stdin.pause(); process.stdin.off('data', onData); process.stdout.write('\n'); done(value.trim()); return }
+        if (char === '\u0003') { process.stdout.write('\n'); process.exit(130) }
+        if (char === '\u007f' || char === '\b') value = value.slice(0, -1)
+        else value += char
+      }
+    }
+    process.stdin.on('data', onData)
+  })
 }
 
 function option(args: readonly string[], name: string): string | undefined {

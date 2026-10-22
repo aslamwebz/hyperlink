@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { readConnectors, writeConnectors, type ConnectorConfig } from '../config.js'
+import { VAULT_PLACEHOLDER } from '../vault.js'
 import { checkModule, makeLoop, type BrainModel, type Made, type Permit, type Tester, type TestReport } from './loop.js'
 
 /**
@@ -98,7 +99,9 @@ export async function installStaged(id: string, permit: Permit, home: string): P
   const target = join(folder, 'connector.ts')
   await rename(stagedFile(home, id), target)
   await rm(join(home, 'made', id), { recursive: true, force: true })
-  const config: ConnectorConfig & { made: true; reaches: readonly string[] } = { name, ...sandboxCommand(target), made: true, reaches: permit.reaches }
+  // The keys it declared are filled from the vault when it starts (hyperlink secret set <name> <key>).
+  const env = Object.fromEntries(permit.secrets.map(secret => [`HYPERLINK_SECRET_${secret.toUpperCase()}`, VAULT_PLACEHOLDER]))
+  const config: ConnectorConfig & { made: true; reaches: readonly string[] } = { name, ...sandboxCommand(target), ...(permit.secrets.length ? { env } : {}), made: true, reaches: permit.reaches }
   await writeConnectors([...existing, config], home)
   return config
 }
