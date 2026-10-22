@@ -9,12 +9,9 @@
  * The brain wakes only to plan, make or repair; a working connector runs with no model at all.
  */
 
-export interface ModelMessage { readonly role: 'system' | 'user' | 'assistant'; readonly content: string }
+import type { BrainModel } from './loop.js'
 
-export interface BrainModel {
-  readonly name: string
-  complete(messages: readonly ModelMessage[], signal?: AbortSignal): Promise<{ text: string; inputTokens: number; outputTokens: number }>
-}
+export type { BrainModel, ModelMessage } from './loop.js'
 
 const TIMEOUT_MS = 180_000
 

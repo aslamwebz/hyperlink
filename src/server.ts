@@ -5,8 +5,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Hub } from './hub.js'
 import { statusPage } from './page.js'
+import { installStaged, localTester } from './brain/make.js'
+import type { Permit } from './brain/loop.js'
 
 const MAX_BODY_BYTES = 4_000_000
+const MAX_CODE_CHARS = 200_000
 
 /**
  * Hyperlink's front door, on this machine only (127.0.0.1):
@@ -14,13 +17,18 @@ const MAX_BODY_BYTES = 4_000_000
  *   /mcp         one MCP server (Streamable HTTP) with every connector's tools
  *   /api/status  the connectors and their state
  *   /api/activity  recent calls: what, how long, whether it worked; never their contents
+ *   /api/make/test     a connector an agent's brain wrote: refused, or staged and tested in the sandbox
+ *   /api/make/install  a staged connector that passed, added to the list (the agent asked its owner first)
  *   /            the status page
  *
  * Every request must name this host (so a web page cannot reach it by DNS rebinding), and every
  * call to /mcp or /api must carry the token. A browser page from another site is refused.
  */
-export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number }): Promise<HttpServer> {
-  const { hub, token, port } = options
+export function startServer(options: { readonly hub: Hub; readonly token: string; readonly port: number; readonly home: string }): Promise<HttpServer> {
+  const { hub, token, port, home } = options
+  const tester = localTester(home)
+  /** Staged connectors that passed, by id, with the permit they showed: only these can be installed. */
+  const passed = new Map<string, Permit>()
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`])
   const ownOrigins = new Set([...hosts].map(host => `http://${host}`))
 
@@ -45,6 +53,21 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
 
     if (url.pathname === '/api/status' && req.method === 'GET') return send(res, 200, { connectors: hub.status(), tools: hub.tools().length })
     if (url.pathname === '/api/activity' && req.method === 'GET') return send(res, 200, { activity: hub.recentActivity(Number(url.searchParams.get('limit') ?? 100)) })
+    if (url.pathname === '/api/make/test' && req.method === 'POST') {
+      const body = await readJson(req) as { code?: unknown } | undefined
+      if (typeof body?.code !== 'string' || body.code.length > MAX_CODE_CHARS) return send(res, 400, { error: 'Send the module as code (a string).' })
+      const tested = await tester.test(body.code)
+      if ('report' in tested && tested.report.permit && !tested.report.problem && tested.report.tests.length > 0 && tested.report.tests.every(test => test.ok)) passed.set(tested.id, tested.report.permit)
+      return send(res, 200, tested)
+    }
+    if (url.pathname === '/api/make/install' && req.method === 'POST') {
+      const body = await readJson(req) as { id?: unknown } | undefined
+      const permit = typeof body?.id === 'string' ? passed.get(body.id) : undefined
+      if (!permit || typeof body?.id !== 'string') return send(res, 404, { error: 'No staged connector that passed its tests has that id.' })
+      passed.delete(body.id)
+      const config = await installStaged(body.id, permit, home)
+      return send(res, 200, { name: config.name })
+    }
     if (url.pathname === '/mcp') {
       if (req.method !== 'POST') return send(res, 405, { error: 'Hyperlink takes MCP requests as POST.' })
       const body = await readJson(req)

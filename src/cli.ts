@@ -6,7 +6,8 @@ import { DEFAULT_PORT, hyperlinkHome, readConnectors, readOrMakeToken, validName
 import { Hub } from './hub.js'
 import { startServer } from './server.js'
 import { createInterface } from 'node:readline/promises'
-import { installConnector, makeConnector, type Permit, type TestReport } from './brain/make.js'
+import { installStaged, makeConnector } from './brain/make.js'
+import type { Permit, TestReport } from './brain/loop.js'
 import { modelFromEnv } from './brain/model.js'
 
 const USAGE = `hyperlink — one MCP server in front of all your MCP servers
@@ -45,7 +46,7 @@ async function start(args: string[]): Promise<void> {
   const token = await readOrMakeToken(home)
   const hub = new Hub()
   await hub.start(await readConnectors(home))
-  const server = await startServer({ hub, token, port })
+  const server = await startServer({ hub, token, port, home })
   const url = `http://127.0.0.1:${port}`
   // Where a caller on this machine finds a running Hyperlink.
   await writeFile(join(home, 'endpoint.json'), JSON.stringify({ url, mcp: `${url}/mcp`, pid: process.pid }, null, 2), 'utf8')
@@ -142,7 +143,7 @@ async function make(args: string[]): Promise<void> {
   const made = await makeConnector(request, { model, home, ...(docs ? { docsUrl: docs } : {}), log: line => console.log(`  ${line}`) })
   const seconds = Math.round((Date.now() - started) / 1000)
   console.log(`  ${made.attempts} tr${made.attempts === 1 ? 'y' : 'ies'}, ${seconds} s, ${made.tokens.input + made.tokens.output} tokens`)
-  if (!made.ok || !made.file || !made.report?.permit) {
+  if (!made.ok || !made.id || !made.file || !made.report?.permit) {
     if (made.report) printReport(made.report)
     return fail(`It could not be made: ${made.problem ?? 'no connector came back'}${made.file ? ` (the last try is in ${made.file})` : ''}`)
   }
@@ -151,7 +152,7 @@ async function make(args: string[]): Promise<void> {
     const answer = await createInterface({ input: process.stdin, output: process.stdout }).question('Add it? [y/N] ')
     if (!/^y(es)?$/iu.test(answer.trim())) return console.log(`Not added. It is kept in ${made.file}`)
   }
-  const config = await installConnector({ file: made.file, permit: made.report.permit }, home)
+  const config = await installStaged(made.id, made.report.permit, home)
   console.log(`Added ${config.name}. A running Hyperlink starts it now; its tools are ${config.name}__<tool>.`)
   process.exit(0)
 }
