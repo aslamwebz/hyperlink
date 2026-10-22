@@ -15,6 +15,8 @@ import { checkModule, makeLoop, type BrainModel, type Made, type Permit, type Te
 
 const DOCS_CHARS = 30_000
 const TEST_TIMEOUT_MS = 90_000
+/** One test call: a tool that hangs fails its test rather than holding the whole try. */
+const TOOL_TEST_TIMEOUT_MS = 20_000
 
 /** Where this package lives: the sandbox may read it (the kit and the MCP SDK), and nothing else of it. */
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -49,7 +51,7 @@ export async function testConnector(file: string): Promise<TestReport> {
     for (const tool of permit.tools) {
       if (tool.changes || !examples[tool.name]) continue
       const started = Date.now()
-      const result = await client.callTool({ name: tool.name, arguments: examples[tool.name] }).catch(error => ({ isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }))
+      const result = await client.callTool({ name: tool.name, arguments: examples[tool.name] }, undefined, { timeout: TOOL_TEST_TIMEOUT_MS }).catch(error => ({ isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }))
       const text = ((result.content ?? []) as { type: string; text?: string }[]).map(part => part.text ?? '').join('\n')
       const empty = text.trim() === '' || text.trim() === '[]' || text.trim() === '{}'
       tests.push({ tool: tool.name, ok: result.isError !== true && !empty, ms: Date.now() - started, chars: text.length, ...(result.isError ? { error: text.slice(0, 600) } : empty ? { error: 'it returned nothing' } : {}) })
@@ -76,7 +78,10 @@ export function localTester(home: string): Tester & { last(): { id: string; repo
       const file = stagedFile(home, id)
       await mkdir(dirname(file), { recursive: true })
       await writeFile(file, `${code}\n`, 'utf8')
-      last = { id, report: await testConnector(file) }
+      const report = await testConnector(file)
+      // Only the newest try is kept: an earlier one that failed is gone once a new one is staged.
+      if (last) await rm(join(home, 'made', last.id), { recursive: true, force: true })
+      last = { id, report }
       return last
     },
   }
