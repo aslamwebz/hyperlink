@@ -54,8 +54,8 @@ hyperlink secret set github GITHUB_TOKEN    # asked for hidden (or piped in), ne
 hyperlink secret list                       # names only; values are never shown
 ```
 
-- **Sealed at rest.** Keys live in  (AES-256-GCM). Its key is kept by the operating system: Windows DPAPI, the macOS Keychain, or the Secret Service on Linux; on a server, . Where none of those is there, Hyperlink keeps nothing rather than keep it in plain text.
-- **Nothing secret in the list.**  holds a  placeholder where a key goes. A key written there in plain text (by hand, or by an app that installed a server) is moved into the vault as soon as Hyperlink sees it.
+- **Sealed at rest.** Keys live in `vault.enc` (AES-256-GCM). Its key is kept by the operating system: Windows DPAPI, the macOS Keychain, or the Secret Service on Linux; on a server, `HYPERLINK_VAULT_PASSWORD`. Where none of those is there, Hyperlink keeps nothing rather than keep it in plain text.
+- **Nothing secret in the list.** `connectors.json` holds a `<vault>` placeholder where a key goes. A key written there in plain text (by hand, or by an app that installed a server) is moved into the vault as soon as Hyperlink sees it.
 - **Each connector gets its own keys and no one else's,** when it starts; nothing it inherits from Hyperlink's environment looks like a key. Change a key and the connector starts again with it.
 - **The brain never sees a secret.** A made connector declares the keys it needs; they reach it at run time, never its code.
 
