@@ -18,9 +18,37 @@ Hyperlink is a many-to-many middleman for AI agents. You run it on your machine,
 - **Local and locked.** It listens on 127.0.0.1 only, every call needs its token, requests naming another host are refused (no DNS rebinding), and pages from other sites are refused.
 - **Logged, not recorded.** Every call is logged as what, how long and whether it worked, never its arguments or results. You can see the log on the status page at `http://127.0.0.1:7466/`.
 
+## The brain: when nothing connects, it makes a way
+
+```sh
+hyperlink make "Wikipedia: search articles, and read an article's summary"
+```
+
+```
+  The brain is writing it (try 1 of 3)…
+  Testing it in the sandbox…
+  2 tries, 20 s, 4221 tokens
+
+  ┌ wikipedia: Searches English Wikipedia and reads article summaries.
+  │ reaches   en.wikipedia.org
+  │ reads     search_articles: Searches English Wikipedia and returns up to 10 matching articles…
+  │ reads     read_summary: Reads an English Wikipedia article's introductory summary.
+  │ tested    search_articles: ok in 545 ms, 1218 characters
+  │ tested    read_summary: ok in 245 ms, 3139 characters
+  └ runs in its own process: no files but its own, no programs, network only to the hosts above
+
+Add it? [y/N]
+```
+
+1. **It writes** a connector: a plain definition of tools, in TypeScript, with no imports and no access to the process.
+2. **It tests** it for real: Hyperlink starts it in a sandbox and runs every tool that changes nothing against the live service. Failures go back to the brain to fix, up to three tries.
+3. **You approve** the permit card: what it reaches, what it reads, what it changes, how its tests went. Nothing is added without your yes (`--yes` skips the question).
+4. **It runs sandboxed:** its own process under Node's permission system (no files but its own, no programs, no workers), no global fetch, and a fetch that reaches only the hosts on its permit.
+
+The brain is any OpenAI-compatible model; MiniMax M3.1 Flash by default (`HYPERLINK_MODEL_URL`, `HYPERLINK_MODEL`, `HYPERLINK_MODEL_KEY`). It wakes only to make or repair: a working connector runs with no AI at all. Point it at an API's docs with `--docs <url>`.
+
 ## Where it is going
 
-- **A brain that makes a way:** when there is no connector for something, Hyperlink's agent writes one (from the app's API, its command line, a website, or a desktop app), tests it in a sandbox, and shows you a permit card before it runs.
 - **Links:** "when this happens in A, do that in B", planned by the brain from a sentence, then running with no AI at all.
 - **A vault:** keys encrypted at rest; the brain never sees a secret.
 - **The map:** your apps around the brain, links lit as data flows.
@@ -43,10 +71,11 @@ Point any MCP client at `http://127.0.0.1:7466/mcp` with the header `Authorizati
 | `hyperlink remove <name>` | remove one |
 | `hyperlink list` | the connectors in the list |
 | `hyperlink status` | how a running Hyperlink's connectors are |
+| `hyperlink make "<what>" [--docs <url>] [--yes]` | the brain writes a connector, tests it, asks you |
 
 ## Built with
 
-TypeScript on Node 20+, and the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk). Hyperlink is also the way [Freya](https://github.com/aslamwebz), a desktop AI companion, reaches every app outside herself.
+TypeScript on Node 22.18+, and the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk). Hyperlink is also the way [Freya](https://github.com/aslamwebz), a desktop AI companion, reaches every app outside herself.
 
 ## License
 
