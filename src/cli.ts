@@ -6,8 +6,8 @@ import { DEFAULT_PORT, hyperlinkHome, readConnectors, readOrMakeToken, validName
 import { Hub } from './hub.js'
 import { startServer } from './server.js'
 import { createInterface } from 'node:readline/promises'
-import { installStaged, makeConnector } from './brain/make.js'
-import type { Permit, TestReport } from './brain/loop.js'
+import { brokenConnector, installStaged, localTester, makeConnector, replaceConnector } from './brain/make.js'
+import { makeLoop, widening, type Permit, type TestReport } from './brain/loop.js'
 import { modelFromEnv } from './brain/model.js'
 import { moveSecretsIntoVault, secretSlot, Vault, VAULT_PLACEHOLDER } from './vault.js'
 
@@ -20,6 +20,7 @@ const USAGE = `hyperlink — one MCP server in front of all your MCP servers
   hyperlink list                              the connectors in the list
   hyperlink status                            ask a running Hyperlink how its connectors are
   hyperlink make "<what>" [--docs <url>] [--yes]  the brain writes a connector, tests it, and asks you
+  hyperlink repair <name> [--yes]             the brain fixes a connector it made that stopped working
   hyperlink secret set <connector> <NAME>     keep a key in the vault (asked for, never on the command line)
   hyperlink secret list [connector]           the keys kept (names only)
   hyperlink secret remove <connector> <NAME>  forget one
@@ -37,6 +38,7 @@ async function main(argv: string[]): Promise<void> {
     case 'status': return status()
     case 'make': return make(rest)
     case 'secret': return secret(rest)
+    case 'repair': return repair(rest)
     // Internal: how a made connector runs, inside the sandbox.
     case 'connector': return (await import('./kit.js')).runConnector(rest[0] ?? '')
     default:
@@ -184,6 +186,47 @@ async function make(args: string[]): Promise<void> {
   }
   const config = await installStaged(made.id, made.report.permit, home)
   console.log(`Added ${config.name}. A running Hyperlink starts it now; its tools are ${config.name}__<tool>.`)
+  process.exit(0)
+}
+
+/**
+ * hyperlink repair <name>: the brain fixes a connector it made, from its code and what went wrong
+ * (a running Hyperlink knows the last errors). A fix that needs no more than its permit goes in; one
+ * that needs more (a new host, a new key, a tool that now changes things) asks first.
+ */
+async function repair(args: string[]): Promise<void> {
+  const yes = args.includes('--yes')
+  const name = args.find(arg => !arg.startsWith('--'))
+  if (!name) return fail('Say which connector to repair: hyperlink repair <name>')
+  const home = hyperlinkHome()
+  // What a running Hyperlink saw go wrong; without one, the brain tests every tool to find it.
+  let found: Awaited<ReturnType<typeof brokenConnector>>
+  try {
+    const endpoint = JSON.parse(await readFile(join(home, 'endpoint.json'), 'utf8')) as { url: string }
+    const response = await fetch(`${endpoint.url}/api/make/broken?name=${encodeURIComponent(name)}`, { headers: { authorization: `Bearer ${await readOrMakeToken(home)}` }, signal: AbortSignal.timeout(5_000) })
+    found = response.ok ? await response.json() as typeof found : await brokenConnector(name, home, null)
+  } catch {
+    found = await brokenConnector(name, home, null).catch(error => fail(error instanceof Error ? error.message : String(error)))
+  }
+  const model = modelFromEnv()
+  console.log(`Repairing ${name}  (brain: ${model.name}; ${found.broken.problem ? 'it does not start' : `${found.broken.errors.length} error(s) kept`})`)
+  const made = await makeLoop(name, { model, tester: localTester(home), repairOf: found.broken, log: line => console.log(`  ${line}`) })
+  console.log(`  ${made.attempts} tr${made.attempts === 1 ? 'y' : 'ies'}, ${made.tokens.input + made.tokens.output} tokens`)
+  if (!made.ok || !made.id || !made.report?.permit) {
+    if (made.report) printReport(made.report)
+    return fail(`It could not be repaired: ${made.problem ?? 'no fix came back'}. ${name} is left as it was.`)
+  }
+  printCard(made.report.permit, made.report)
+  const wider = widening(found.permit, made.report.permit)
+  if (wider.length > 0) {
+    console.log(`  The fix needs more than ${name} had: ${wider.join('; ')}.`)
+    if (!yes) {
+      const answer = await createInterface({ input: process.stdin, output: process.stdout }).question('Allow it? [y/N] ')
+      if (!/^y(es)?$/iu.test(answer.trim())) return console.log(`Not changed. ${name} is left as it was.`)
+    }
+  }
+  await replaceConnector(name, made.id, made.report.permit, home)
+  console.log(`Repaired ${name}. The old version is kept as connector.ts.previous; a running Hyperlink starts the new one now.`)
   process.exit(0)
 }
 
