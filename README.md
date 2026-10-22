@@ -47,6 +47,16 @@ Add it? [y/N]
 
 The brain is any OpenAI-compatible model; MiniMax M3.1 Flash by default (`HYPERLINK_MODEL_URL`, `HYPERLINK_MODEL`, `HYPERLINK_MODEL_KEY`). It wakes only to make or repair: a working connector runs with no AI at all. Point it at an API's docs with `--docs <url>`.
 
+## Repair: when a service changes, the brain fixes its connector
+
+A connector the brain made that will not start, or fails three calls in a row, is marked as needing repair.
+
+```sh
+hyperlink repair wikipedia
+```
+
+The brain gets its code and its last errors, writes a fix, and Hyperlink tests it in the sandbox like a new one. A fix that needs no more than its permit (the same hosts, keys and kinds of tools) goes in at once; one that needs more (a new host, a new key, a tool that now changes things) waits for your yes. The old version is kept as `connector.ts.previous`, and the connector starts again before the repair answers.
+
 ## The vault: keys sealed, each connector gets only its own
 
 ```sh
@@ -83,6 +93,7 @@ Point any MCP client at `http://127.0.0.1:7466/mcp` with the header `Authorizati
 | `hyperlink list` | the connectors in the list |
 | `hyperlink status` | how a running Hyperlink's connectors are |
 | `hyperlink make "<what>" [--docs <url>] [--yes]` | the brain writes a connector, tests it, asks you |
+| `hyperlink repair <name> [--yes]` | the brain fixes a connector it made that stopped working |
 | `hyperlink secret set <connector> <NAME>` | keep a key in the vault |
 | `hyperlink secret list [connector]` | the keys kept (names only) |
 | `hyperlink secret remove <connector> <NAME>` | forget one |
