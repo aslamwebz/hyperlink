@@ -77,6 +77,9 @@ async function start(args: string[]): Promise<void> {
   }
   process.on('SIGINT', () => { void stop() })
   process.on('SIGTERM', () => { void stop() })
+  // Started by another program (Freya's supervisor): it goes when that program goes, never left holding the port.
+  const parent = Number(process.env.HYPERLINK_PARENT_PID)
+  if (parent > 0) setInterval(() => { try { process.kill(parent, 0) } catch { void stop() } }, 2_000)
 }
 
 async function add(args: string[]): Promise<void> {
