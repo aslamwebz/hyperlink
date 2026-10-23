@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
 import type { ConnectorConfig } from './config.js'
 import { looksSecret, VAULT_PLACEHOLDER, type Secrets } from './vault.js'
+import { SIGN_IN_SECRETS } from './kit.js'
 
 /** Between a connector's name and its tool's: "chrome__browser_navigate". */
 export const SEPARATOR = '__'
@@ -20,6 +21,8 @@ export interface ConnectorStatus {
   readonly failing: number
   /** A made connector that will not start, or keeps failing: its brain can repair it. */
   readonly needsRepair: boolean
+  /** Its app needs him to sign in once: not yet (needed), or done. Null when it has no sign-in. */
+  readonly signIn: 'needed' | 'signed-in' | null
 }
 
 /** One call through Hyperlink: what was called, how long it took, whether it worked. Never its arguments or results. */
@@ -41,7 +44,11 @@ interface Running {
   failures: number
   /** The last few error messages, kept in memory for a repair; never arguments or results. */
   errors: string[]
+  signedIn: boolean
 }
+
+/** A sign-in's keys: until he signs in they are not there, and the connector still starts (its tools say he has to sign in). */
+const SIGN_IN_SLOTS = new Set<string>(SIGN_IN_SECRETS.map(name => `HYPERLINK_SECRET_${name}`))
 
 const ACTIVITY_KEPT = 500
 /** Failed calls in a row before a made connector is said to need repair. */
@@ -68,17 +75,19 @@ export class Hub {
 
   async add(config: ConnectorConfig): Promise<void> {
     await this.remove(config.name)
-    const running: Running = { config, client: null, tools: [], state: config.disabled ? 'disabled' : 'starting', problem: null, failures: 0, errors: [] }
+    const running: Running = { config, client: null, tools: [], state: config.disabled ? 'disabled' : 'starting', problem: null, failures: 0, errors: [], signedIn: false }
     this.connectors.set(config.name, running)
     if (config.disabled) return
     const client = new Client({ name: 'hyperlink', version: '0.1.0' })
     try {
       const own = (await this.secrets())[config.name] ?? {}
-      const fill = (values: Readonly<Record<string, string>> | undefined) => Object.fromEntries(Object.entries(values ?? {}).map(([name, value]) => {
-        if (value !== VAULT_PLACEHOLDER) return [name, value]
+      running.signedIn = own.HYPERLINK_SECRET_OAUTH_REFRESH_TOKEN !== undefined
+      const fill = (values: Readonly<Record<string, string>> | undefined) => Object.fromEntries(Object.entries(values ?? {}).flatMap(([name, value]) => {
+        if (value !== VAULT_PLACEHOLDER) return [[name, value]]
         const kept = own[name]
+        if (kept === undefined && config.signIn && SIGN_IN_SLOTS.has(name)) return []
         if (kept === undefined) throw new Error(`it needs the secret ${name}: hyperlink secret set ${config.name} ${name}`)
-        return [name, kept]
+        return [[name, kept]]
       }))
       const transport = config.url
         ? new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: fill(config.headers) } })
@@ -156,6 +165,7 @@ export class Hub {
       made: isMade(running.config),
       failing: running.failures,
       needsRepair: isMade(running.config) && (running.state === 'failed' || running.failures >= REPAIR_AFTER_FAILURES),
+      signIn: running.config.signIn ? (running.signedIn ? 'signed-in' : 'needed') : null,
     }))
   }
 
