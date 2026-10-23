@@ -1,3 +1,5 @@
+import type { SignIn } from '../kit.js'
+
 /**
  * The making loop, with nothing of the machine in it: the brain writes, a tester checks, the brain
  * fixes. Hyperlink's own command runs it with its model and its sandbox; an agent that hosts
@@ -73,6 +75,8 @@ export interface Permit {
   readonly description: string
   readonly reaches: readonly string[]
   readonly secrets: readonly string[]
+  /** He signs in to the app once (OAuth 2): where, and what it asks for. */
+  readonly signIn?: SignIn
   readonly tools: readonly { readonly name: string; readonly description: string; readonly changes: boolean }[]
 }
 export interface TestReport { readonly permit: Permit | null; readonly tests: readonly ToolTest[]; readonly problem: string | null }
@@ -161,9 +165,11 @@ function repairRequest(broken: Broken, docs: string): string {
 }
 
 /** What a repair would change in a connector's permit: new hosts, new keys, tools that now change things. */
-export function widening(before: Pick<Permit, 'reaches' | 'secrets' | 'tools'>, after: Permit): readonly string[] {
+export function widening(before: Pick<Permit, 'reaches' | 'secrets' | 'tools' | 'signIn'>, after: Permit): readonly string[] {
   const changesBefore = new Set(before.tools.filter(tool => tool.changes).map(tool => tool.name))
   return [
+    ...(after.signIn && after.signIn.authorize !== before.signIn?.authorize ? [`signs in at ${new URL(after.signIn.authorize).hostname}`] : []),
+    ...(after.signIn?.scopes ?? []).filter(scope => !(before.signIn?.scopes ?? []).includes(scope)).map(scope => `asks for ${scope}`),
     ...after.reaches.filter(host => !before.reaches.includes(host)).map(host => `reaches ${host}`),
     ...after.secrets.filter(secret => !before.secrets.includes(secret)).map(secret => `needs ${secret}`),
     ...after.tools.filter(tool => tool.changes && !changesBefore.has(tool.name)).map(tool => `${tool.name} changes things`),
@@ -176,6 +182,7 @@ export function permitText(permit: Permit, report: TestReport): string {
     `${permit.name}: ${permit.description}`,
     `reaches: ${permit.reaches.join(', ') || 'nothing'}`,
     ...(permit.secrets.length ? [`needs: ${permit.secrets.join(', ')}`] : []),
+    ...(permit.signIn ? [`signs in: once, at ${new URL(permit.signIn.authorize).hostname}, for ${permit.signIn.scopes.join(' ')}`] : []),
     ...permit.tools.map(tool => `${tool.changes ? 'changes' : 'reads'}: ${tool.name}: ${tool.description.slice(0, 120)}`),
     ...report.tests.map(test => `tested ${test.tool}: ${test.ok ? `ok in ${test.ms} ms` : `failed (${test.error ?? ''})`}`),
     'runs in its own process: no files but its own, no programs, network only to the hosts above',

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { SignIn } from './kit.js'
 
 /**
  * Where Hyperlink keeps its state: `HYPERLINK_HOME`, or `~/.hyperlink`.
@@ -29,6 +30,8 @@ export interface ConnectorConfig {
   readonly allow?: readonly string[]
   /** A connector can be kept but switched off. */
   readonly disabled?: boolean
+  /** He signs in to its app once (OAuth 2); what it ends with is kept in the vault. */
+  readonly signIn?: SignIn
 }
 
 interface ConnectorsFile { readonly connectors: Record<string, Omit<ConnectorConfig, 'name'>> }

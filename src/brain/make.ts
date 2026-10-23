@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { readConnectors, writeConnectors, type ConnectorConfig } from '../config.js'
 import { VAULT_PLACEHOLDER } from '../vault.js'
+import { SIGN_IN_SECRETS, type SignIn } from '../kit.js'
 import { checkModule, makeLoop, type BrainModel, type Broken, type Made, type Permit, type Tester, type TestReport } from './loop.js'
 
 /**
@@ -29,7 +30,7 @@ export function sandboxCommand(file: string): { command: string; args: string[] 
 }
 
 /** Start a connector in the sandbox, read its permit from the handshake, and run its safe examples. */
-export async function testConnector(file: string): Promise<TestReport> {
+export async function testConnector(file: string, options: { readonly examples?: boolean } = {}): Promise<TestReport> {
   const { command, args } = sandboxCommand(file)
   let stderr = ''
   const transport = new StdioClientTransport({ command, args, stderr: 'pipe' })
@@ -37,7 +38,7 @@ export async function testConnector(file: string): Promise<TestReport> {
   const client = new Client({ name: 'hyperlink-maker', version: '1' })
   try {
     await Promise.race([client.connect(transport), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('it did not start')), TEST_TIMEOUT_MS))])
-    const facts = JSON.parse(client.getInstructions() ?? '{}') as { description?: string; reaches?: string[]; secrets?: string[]; examples?: Record<string, Record<string, unknown>> }
+    const facts = JSON.parse(client.getInstructions() ?? '{}') as { description?: string; reaches?: string[]; secrets?: string[]; signIn?: SignIn; examples?: Record<string, Record<string, unknown>> }
     // Plain data the sandboxed connector reported about itself.
     const examples = facts.examples ?? {}
     const listed = (await client.listTools()).tools
@@ -46,11 +47,12 @@ export async function testConnector(file: string): Promise<TestReport> {
       description: facts.description ?? '',
       reaches: facts.reaches ?? [],
       secrets: facts.secrets ?? [],
+      ...(facts.signIn ? { signIn: facts.signIn } : {}),
       tools: listed.map(tool => ({ name: tool.name, description: (tool.description ?? '').replace(/ \(changes something\)$/u, ''), changes: (tool.description ?? '').endsWith('(changes something)') })),
     }
     const tests: TestReport['tests'][number][] = []
     for (const tool of permit.tools) {
-      if (tool.changes || !examples[tool.name]) continue
+      if (options.examples === false || tool.changes || !examples[tool.name]) continue
       const started = Date.now()
       const result = await client.callTool({ name: tool.name, arguments: examples[tool.name] }, undefined, { timeout: TOOL_TEST_TIMEOUT_MS }).catch(error => ({ isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }))
       const text = ((result.content ?? []) as { type: string; text?: string }[]).map(part => part.text ?? '').join('\n')
@@ -91,17 +93,24 @@ export function localTester(home: string): Tester & { last(): { id: string; repo
 /** Approved: the staged connector moves to its own folder and joins the list, started in the sandbox. */
 export async function installStaged(id: string, permit: Permit, home: string): Promise<ConnectorConfig> {
   if (!/^[a-f0-9]{12}$/u.test(id)) throw new Error('There is no such staged connector.')
+  const config = await installFile(stagedFile(home, id), permit, home, 'move')
+  await rm(join(home, 'made', id), { recursive: true, force: true })
+  return config
+}
+
+/** A connector file he approved joins the list in a folder of its own (a staged one moved there, a ready one copied). */
+export async function installFile(file: string, permit: Permit, home: string, how: 'move' | 'copy'): Promise<ConnectorConfig> {
   const existing = await readConnectors(home)
   let name = permit.name
   for (let n = 2; existing.some(entry => entry.name === name); n += 1) name = `${permit.name}-${n}`
   const folder = join(home, 'connectors', name)
   await mkdir(folder, { recursive: true })
   const target = join(folder, 'connector.ts')
-  await rename(stagedFile(home, id), target)
-  await rm(join(home, 'made', id), { recursive: true, force: true })
-  // The keys it declared are filled from the vault when it starts (hyperlink secret set <name> <key>).
-  const env = Object.fromEntries(permit.secrets.map(secret => [`HYPERLINK_SECRET_${secret.toUpperCase()}`, VAULT_PLACEHOLDER]))
-  const config: MadeConfig = { name, ...sandboxCommand(target), ...(permit.secrets.length ? { env } : {}), made: true, reaches: permit.reaches, permit: keptPermit(permit) }
+  await (how === 'move' ? rename(file, target) : copyFile(file, target))
+  // The keys it declared, and a sign-in's, are filled from the vault when it starts (hyperlink secret set <name> <key>, hyperlink signin <name>).
+  const secrets = [...permit.secrets, ...(permit.signIn ? SIGN_IN_SECRETS : [])]
+  const env = Object.fromEntries(secrets.map(secret => [`HYPERLINK_SECRET_${secret.toUpperCase()}`, VAULT_PLACEHOLDER]))
+  const config: MadeConfig = { name, ...sandboxCommand(target), ...(secrets.length ? { env } : {}), made: true, reaches: permit.reaches, ...(permit.signIn ? { signIn: permit.signIn } : {}), permit: keptPermit(permit) }
   await writeConnectors([...existing, config], home)
   return config
 }
@@ -123,10 +132,10 @@ export async function readDocs(url: string): Promise<string> {
 }
 
 /** A made connector's list entry: where it runs, and the permit he approved (what a repair is held to). */
-export type MadeConfig = ConnectorConfig & { readonly made: true; readonly reaches: readonly string[]; readonly permit?: Pick<Permit, 'reaches' | 'secrets' | 'tools'>; readonly repairedAt?: string }
+export type MadeConfig = ConnectorConfig & { readonly made: true; readonly reaches: readonly string[]; readonly permit?: Pick<Permit, 'reaches' | 'secrets' | 'tools' | 'signIn'>; readonly repairedAt?: string }
 
-function keptPermit(permit: Permit): Pick<Permit, 'reaches' | 'secrets' | 'tools'> {
-  return { reaches: permit.reaches, secrets: permit.secrets, tools: permit.tools.map(tool => ({ name: tool.name, description: tool.description, changes: tool.changes })) }
+function keptPermit(permit: Permit): Pick<Permit, 'reaches' | 'secrets' | 'tools' | 'signIn'> {
+  return { reaches: permit.reaches, secrets: permit.secrets, ...(permit.signIn ? { signIn: permit.signIn } : {}), tools: permit.tools.map(tool => ({ name: tool.name, description: tool.description, changes: tool.changes })) }
 }
 
 /** A made connector's file: the last argument of its sandbox command. */
@@ -137,7 +146,7 @@ function fileOf(config: ConnectorConfig): string {
 }
 
 /** A made connector as its repair sees it: its code, its approved permit, and what went wrong. */
-export async function brokenConnector(name: string, home: string, evidence: { readonly problem: string | null; readonly errors: readonly string[] } | null): Promise<{ readonly broken: Broken; readonly permit: Pick<Permit, 'reaches' | 'secrets' | 'tools'> }> {
+export async function brokenConnector(name: string, home: string, evidence: { readonly problem: string | null; readonly errors: readonly string[] } | null): Promise<{ readonly broken: Broken; readonly permit: Pick<Permit, 'reaches' | 'secrets' | 'tools' | 'signIn'> }> {
   const config = (await readConnectors(home)).find(entry => entry.name === name) as MadeConfig | undefined
   if (!config) throw new Error(`There is no connector named ${name}.`)
   if (config.made !== true) throw new Error(`${name} was not made by Hyperlink, so it cannot be repaired from its code.`)
@@ -158,9 +167,10 @@ export async function replaceConnector(name: string, id: string, permit: Permit,
   await rename(stagedFile(home, id), file)
   await rm(join(home, 'made', id), { recursive: true, force: true })
   const slot = (secret: string) => `HYPERLINK_SECRET_${secret.toUpperCase()}`
-  const env = { ...config.env, ...Object.fromEntries(permit.secrets.map(secret => [slot(secret), config.env?.[slot(secret)] ?? VAULT_PLACEHOLDER])) }
+  const secrets = [...permit.secrets, ...(permit.signIn ? SIGN_IN_SECRETS : [])]
+  const env = { ...config.env, ...Object.fromEntries(secrets.map(secret => [slot(secret), config.env?.[slot(secret)] ?? VAULT_PLACEHOLDER])) }
   // repairedAt changes the entry, so a running Hyperlink starts it again with the new code.
-  const next: MadeConfig = { ...config, ...(Object.keys(env).length ? { env } : {}), reaches: permit.reaches, permit: keptPermit(permit), repairedAt: new Date().toISOString() }
+  const next: MadeConfig = { ...config, ...(Object.keys(env).length ? { env } : {}), reaches: permit.reaches, ...(permit.signIn ? { signIn: permit.signIn } : {}), permit: keptPermit(permit), repairedAt: new Date().toISOString() }
   await writeConnectors(connectors.map(entry => entry.name === name ? next : entry), home)
   return next
 }

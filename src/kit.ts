@@ -18,7 +18,27 @@ export interface ToolContext {
   readonly fetch: (url: string, init?: RequestInit) => Promise<Response>
   /** A secret this connector declared (an API key), or undefined when none is set. */
   readonly secret: (name: string) => string | undefined
+  /** For a connector with a sign-in: a fresh access token (renewed as it runs out). Throws, in a sentence, before he has signed in. */
+  readonly accessToken: () => Promise<string>
 }
+
+/**
+ * How the owner signs in to an app once (OAuth 2: an authorization code with PKCE, answered on this
+ * machine). Hyperlink keeps what it ends with in the vault; the connector then gets a fresh access
+ * token on every call, and never sees his password.
+ */
+export interface SignIn {
+  /** The page he signs in on, e.g. https://accounts.google.com/o/oauth2/v2/auth */
+  readonly authorize: string
+  /** Where a code or a refresh token becomes an access token; its host must be in `reaches`. */
+  readonly token: string
+  readonly scopes: readonly string[]
+  /** Extra parameters for the sign-in page (Google: access_type=offline, prompt=consent). */
+  readonly params?: Readonly<Record<string, string>>
+}
+
+/** What a sign-in keeps for a connector, given to it as HYPERLINK_SECRET_<NAME>: his app's client, and the refresh token it ends with. */
+export const SIGN_IN_SECRETS = ['OAUTH_CLIENT_ID', 'OAUTH_CLIENT_SECRET', 'OAUTH_REFRESH_TOKEN'] as const
 
 export interface ConnectorTool {
   readonly name: string
@@ -39,6 +59,8 @@ export interface ConnectorDefinition {
   readonly reaches: readonly string[]
   /** Names of the secrets it needs (API keys), given to it as HYPERLINK_SECRET_<NAME>. */
   readonly secrets?: readonly string[]
+  /** The app needs him to sign in once (OAuth 2); its tools then call accessToken(). */
+  readonly signIn?: SignIn
   readonly tools: readonly ConnectorTool[]
 }
 
@@ -62,7 +84,36 @@ export function validateDefinition(value: unknown): ConnectorDefinition {
     if (tool.input?.type !== 'object') throw new Error(`${tool.name}: input must be a JSON Schema with type "object"`)
     if (typeof tool.run !== 'function') throw new Error(`${tool.name}: run must be a function`)
   }
+  if (definition.signIn !== undefined) {
+    const signIn = definition.signIn as Partial<SignIn> | null
+    const https = (value: unknown) => { try { return new URL(String(value)).protocol === 'https:' } catch { return false } }
+    if (!signIn || !https(signIn.authorize) || !https(signIn.token)) throw new Error('signIn needs an https authorize page and an https token address')
+    const tokenHost = new URL(String(signIn.token)).hostname
+    if (!definition.reaches.some(host => tokenHost === host || tokenHost.endsWith(`.${host}`))) throw new Error(`signIn's token address (${tokenHost}) must be in reaches`)
+    if (!Array.isArray(signIn.scopes) || signIn.scopes.some(scope => typeof scope !== 'string')) throw new Error('signIn.scopes must be a list of strings')
+    if (signIn.params !== undefined && (typeof signIn.params !== 'object' || Object.values(signIn.params).some(value => typeof value !== 'string'))) throw new Error('signIn.params must be plain text values')
+  }
   return definition as ConnectorDefinition
+}
+
+/** A fresh access token from the refresh token a sign-in kept, through the connector's own fetch; kept until shortly before it runs out. */
+function accessTokens(definition: ConnectorDefinition, fetchFor: ToolContext['fetch']): ToolContext['accessToken'] {
+  let kept: { readonly token: string; readonly until: number } | null = null
+  const env = (name: string) => process.env[`HYPERLINK_SECRET_${name}`]
+  return async () => {
+    const signIn = definition.signIn
+    if (!signIn) throw new Error(`${definition.name} has no sign-in.`)
+    if (kept && Date.now() < kept.until) return kept.token
+    const refresh = env('OAUTH_REFRESH_TOKEN'), client = env('OAUTH_CLIENT_ID'), clientSecret = env('OAUTH_CLIENT_SECRET')
+    if (!refresh || !client) throw new Error(`Not signed in to ${definition.name} yet: the owner signs in once (on Hyperlink's page in his app, or: hyperlink signin ${definition.name}).`)
+    const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: client, ...(clientSecret ? { client_secret: clientSecret } : {}) })
+    const response = await fetchFor(signIn.token, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body })
+    const answer = await response.json().catch(() => null) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null
+    if (!response.ok || typeof answer?.access_token !== 'string') throw new Error(`The sign-in to ${definition.name} no longer works (${typeof answer?.error === 'string' ? answer.error : response.status}): the owner signs in again.`)
+    const seconds = typeof answer.expires_in === 'number' ? answer.expires_in : 3600
+    kept = { token: answer.access_token, until: Date.now() + Math.max(30, seconds - 60) * 1000 }
+    return kept.token
+  }
 }
 
 /** fetch to the declared hosts only, https only (http for this machine), redirects checked one by one. */
@@ -94,12 +145,14 @@ export async function runConnector(file: string): Promise<void> {
   for (const name of ['fetch', 'WebSocket', 'EventSource'] as const) Reflect.deleteProperty(globalThis, name)
   const loaded = await import(pathToFileURL(file).href) as { default?: unknown }
   const definition = validateDefinition(loaded.default)
+  const fetchFor = restrictedFetch(definition.reaches, realFetch)
   const context: ToolContext = {
-    fetch: restrictedFetch(definition.reaches, realFetch),
+    fetch: fetchFor,
     secret: name => (definition.secrets ?? []).includes(name) ? process.env[`HYPERLINK_SECRET_${name.toUpperCase()}`] : undefined,
+    accessToken: accessTokens(definition, fetchFor),
   }
   // Its permit facts travel in the handshake, so Hyperlink learns them without loading its code.
-  const server = new Server({ name: definition.name, version: '1' }, { capabilities: { tools: {} }, instructions: JSON.stringify({ description: definition.description, reaches: definition.reaches, secrets: definition.secrets ?? [], examples: Object.fromEntries(definition.tools.filter(tool => !tool.changes && tool.example && typeof tool.example === 'object').map(tool => [tool.name, tool.example])) }) })
+  const server = new Server({ name: definition.name, version: '1' }, { capabilities: { tools: {} }, instructions: JSON.stringify({ description: definition.description, reaches: definition.reaches, secrets: definition.secrets ?? [], ...(definition.signIn ? { signIn: definition.signIn } : {}), examples: Object.fromEntries(definition.tools.filter(tool => !tool.changes && tool.example && typeof tool.example === 'object').map(tool => [tool.name, tool.example])) }) })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: definition.tools.map(tool => ({ name: tool.name, description: `${tool.description}${tool.changes ? ' (changes something)' : ''}`, inputSchema: tool.input as { type: 'object' } })),
   }))
