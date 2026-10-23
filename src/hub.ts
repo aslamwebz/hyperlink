@@ -119,7 +119,17 @@ export class Hub {
     const running = this.connectors.get(connector)
     const started = Date.now()
     if (!running?.client || running.state !== 'running' || !running.tools.some(entry => entry.name === tool)) {
-      const error = running ? `${connector} has no running tool "${tool}"` : `No connector named "${connector}"`
+      // A tool asked for by a name it does not have: the ones whose name or description share its words, so the caller can go on.
+      const words = tool.toLowerCase().split(/[^a-z0-9]+/u).filter(word => word.length > 2 && !['browser', 'tool', 'get', 'set'].includes(word))
+      const near = running?.tools
+        .map(entry => ({ entry, score: words.filter(word => `${entry.name} ${entry.description ?? ''}`.toLowerCase().includes(word)).length }))
+        .filter(item => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3)
+        .map(item => `${connector}${SEPARATOR}${item.entry.name}`) ?? []
+      const error = running
+        ? `${connector} has no running tool "${tool}"${near.length > 0 ? `; its tools that match: ${near.join(', ')}` : ''}`
+        : `No connector named "${connector}"`
       this.log({ connector, tool, ms: 0, ok: false, error })
       return { content: [{ type: 'text', text: error }], isError: true }
     }
