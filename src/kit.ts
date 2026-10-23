@@ -105,7 +105,8 @@ function accessTokens(definition: ConnectorDefinition, fetchFor: ToolContext['fe
     if (!signIn) throw new Error(`${definition.name} has no sign-in.`)
     if (kept && Date.now() < kept.until) return kept.token
     const refresh = env('OAUTH_REFRESH_TOKEN'), client = env('OAUTH_CLIENT_ID'), clientSecret = env('OAUTH_CLIENT_SECRET')
-    if (!refresh || !client) throw new Error(`Not signed in to ${definition.name} yet: the owner signs in once (on Hyperlink's page in his app, or: hyperlink signin ${definition.name}).`)
+    // Said to an agent as much as to a person: only he can sign in, and nothing else of this connector works until he has.
+    if (!refresh || !client) throw new Error(`Not signed in to ${definition.name} yet. Only the owner can sign in, once, himself, on Hyperlink's page in his app; until he has, no tool of ${definition.name} can reach it.`)
     const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: client, ...(clientSecret ? { client_secret: clientSecret } : {}) })
     const response = await fetchFor(signIn.token, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' }, body })
     const answer = await response.json().catch(() => null) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null
