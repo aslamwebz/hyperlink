@@ -5,7 +5,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Hub } from './hub.js'
 import { statusPage } from './page.js'
-import { brokenConnector, installStaged, localTester, replaceConnector } from './brain/make.js'
+import { brokenConnector, installReady, installStaged, localTester, readyConnectors, replaceConnector } from './brain/make.js'
+import { openInBrowser, signInConnector } from './signin.js'
 import { widening, type Permit } from './brain/loop.js'
 import { readConnectors, writeConnectors } from './config.js'
 import { secretSlot, VAULT_PLACEHOLDER, type Vault } from './vault.js'
@@ -24,6 +25,8 @@ const MAX_CODE_CHARS = 200_000
  *   /api/make/broken   a made connector that stopped working: its code, approved permit, and what went wrong
  *   /api/make/replace  a tested repair takes its place (the old kept beside it); one that needs more than its permit needs approved
  *   /api/secrets       keep a connector's key in the vault (POST), or list the names kept (GET); values never come back
+ *   /api/signin        begin a connector's sign-in in his browser (POST), or how it is going (GET)
+ *   /api/ready         the connectors that come with Hyperlink, with their permits (GET); /api/ready/install adds one (he said yes)
  *   /            the status page
  *
  * Every request must name this host (so a web page cannot reach it by DNS rebinding), and every
@@ -35,6 +38,8 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
   const tester = localTester(home)
   /** Staged connectors that passed, by id, with the permit they showed: only these can be installed. */
   const passed = new Map<string, Permit>()
+  /** Sign-ins under way or over, by connector: waiting for him, done, or why not. */
+  const signIns = new Map<string, { state: 'waiting' | 'done' | 'failed'; problem: string | null }>()
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`])
   const ownOrigins = new Set([...hosts].map(host => `http://${host}`))
 
@@ -112,6 +117,36 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
       await vault.set(config.name, slot.key, body.value)
       if (config[slot.place]?.[slot.key] !== VAULT_PLACEHOLDER) await writeConnectors(connectors.map(entry => entry.name === config.name ? { ...config, [slot.place]: { ...config[slot.place], [slot.key]: VAULT_PLACEHOLDER } } : entry), home)
       return send(res, 200, { kept: slot.key })
+    }
+    if (url.pathname === '/api/signin') {
+      if (!vault) return send(res, 503, { error: 'The vault is closed on this machine, so a sign-in cannot be kept.' })
+      if (req.method === 'GET') return send(res, 200, signIns.get(url.searchParams.get('name') ?? '') ?? { state: 'none', problem: null })
+      if (req.method !== 'POST') return send(res, 405, { error: 'GET or POST.' })
+      const body = await readJson(req) as { name?: unknown; open?: unknown } | undefined
+      const config = (await readConnectors(home)).find(entry => entry.name === body?.name)
+      if (!config) return send(res, 404, { error: `There is no connector named ${String(body?.name)}.` })
+      let started: Awaited<ReturnType<typeof signInConnector>>
+      try { started = await signInConnector(config, vault) } catch (error) { return send(res, 400, { error: error instanceof Error ? error.message : String(error) }) }
+      signIns.set(config.name, { state: 'waiting', problem: null })
+      // Kept in the vault when he finishes; the vault watcher starts the connector again with it.
+      void started.finished.then(
+        () => { signIns.set(config.name, { state: 'done', problem: null }) },
+        error => { signIns.set(config.name, { state: 'failed', problem: error instanceof Error ? error.message : String(error) }) },
+      )
+      if (body?.open !== false) openInBrowser(started.url)
+      return send(res, 200, { url: started.url })
+    }
+    if (url.pathname === '/api/ready' && req.method === 'GET') {
+      const installed = new Set((await readConnectors(home)).map(entry => entry.name))
+      return send(res, 200, { ready: (await readyConnectors()).map(entry => ({ ...entry, installed: installed.has(entry.name) })) })
+    }
+    if (url.pathname === '/api/ready/install' && req.method === 'POST') {
+      const body = await readJson(req) as { name?: unknown } | undefined
+      if (typeof body?.name !== 'string') return send(res, 400, { error: 'Send the ready connector\'s name.' })
+      let config: Awaited<ReturnType<typeof installReady>>
+      try { config = await installReady(body.name, home) } catch (error) { return send(res, 404, { error: error instanceof Error ? error.message : String(error) }) }
+      await options.listChanged?.()
+      return send(res, 200, { name: config.name })
     }
     if (url.pathname === '/mcp') {
       if (req.method !== 'POST') return send(res, 405, { error: 'Hyperlink takes MCP requests as POST.' })

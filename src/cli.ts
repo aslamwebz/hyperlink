@@ -6,7 +6,8 @@ import { DEFAULT_PORT, hyperlinkHome, readConnectors, readOrMakeToken, validName
 import { Hub } from './hub.js'
 import { startServer } from './server.js'
 import { createInterface } from 'node:readline/promises'
-import { brokenConnector, installStaged, localTester, makeConnector, replaceConnector } from './brain/make.js'
+import { brokenConnector, installReady, installStaged, localTester, makeConnector, readyConnectors, replaceConnector } from './brain/make.js'
+import { openInBrowser, signInConnector, SIGN_IN_WAIT_MS } from './signin.js'
 import { makeLoop, widening, type Permit, type TestReport } from './brain/loop.js'
 import { modelFromEnv } from './brain/model.js'
 import { moveSecretsIntoVault, secretSlot, Vault, VAULT_PLACEHOLDER } from './vault.js'
@@ -24,6 +25,8 @@ const USAGE = `hyperlink — one MCP server in front of all your MCP servers
   hyperlink secret set <connector> <NAME>     keep a key in the vault (asked for, never on the command line)
   hyperlink secret list [connector]           the keys kept (names only)
   hyperlink secret remove <connector> <NAME>  forget one
+  hyperlink signin <connector>                sign in to its app once, in your browser (OAuth); kept in the vault
+  hyperlink ready [add <name>] [--yes]        the connectors that come with Hyperlink; add one
 
   Agents connect to http://127.0.0.1:<port>/mcp with "Authorization: Bearer <token>";
   the token is in ${join('<HYPERLINK_HOME>', 'token')} (HYPERLINK_HOME is ~/.hyperlink unless set).`
@@ -39,6 +42,8 @@ async function main(argv: string[]): Promise<void> {
     case 'make': return make(rest)
     case 'secret': return secret(rest)
     case 'repair': return repair(rest)
+    case 'signin': return signin(rest)
+    case 'ready': return ready(rest)
     // Internal: how a made connector runs, inside the sandbox.
     case 'connector': return (await import('./kit.js')).runConnector(rest[0] ?? '')
     default:
@@ -240,6 +245,7 @@ function printCard(permit: Permit, report: TestReport): void {
   console.log(`  ┌ ${permit.name}: ${permit.description}`)
   console.log(`  │ reaches   ${permit.reaches.join(', ') || 'nothing'}`)
   if (permit.secrets.length) console.log(`  │ needs     ${permit.secrets.join(', ')} (set HYPERLINK_SECRET_<NAME>)`)
+  if (permit.signIn) console.log(`  │ signs in  once, at ${new URL(permit.signIn.authorize).hostname}, for ${permit.signIn.scopes.join(' ')}`)
   for (const tool of permit.tools) console.log(`  │ ${tool.changes ? 'changes' : 'reads  '}   ${tool.name}: ${tool.description.slice(0, 90)}`)
   printReport(report, '  │ ')
   console.log('  └ runs in its own process: no files but its own, no programs, network only to the hosts above')
@@ -281,6 +287,56 @@ async function secret(args: string[]): Promise<void> {
     await writeConnectors(connectors.map(entry => entry.name === connector ? next : entry), home)
   }
   console.log(`Kept ${slot.key} for ${connector} in the vault. A running Hyperlink starts ${connector} again with it.`)
+}
+
+/**
+ * hyperlink signin <name>: his app's client (asked for once, kept in the vault), then the app's own
+ * sign-in page in his browser; the refresh token it ends with goes into the vault.
+ */
+async function signin(args: string[]): Promise<void> {
+  const [name] = args
+  const home = hyperlinkHome()
+  const connectors = await readConnectors(home)
+  const config = connectors.find(entry => entry.name === name)
+  if (!config) return fail(`There is no connector named "${name ?? ''}".`)
+  if (!config.signIn) return fail(`${config.name} has no sign-in.`)
+  const vault = await Vault.open(home).catch(error => fail(error instanceof Error ? error.message : String(error)))
+  const kept = (await vault.read())[config.name] ?? {}
+  if (!kept.HYPERLINK_SECRET_OAUTH_CLIENT_ID) {
+    console.log(`${config.name} signs in through an app client of yours (made once in the app's developer console, as a desktop app).`)
+    const id = await readHidden('Client ID: ')
+    if (!id) return fail('Nothing was given, so nothing changed.')
+    await vault.set(config.name, 'HYPERLINK_SECRET_OAUTH_CLIENT_ID', id)
+    const secret = await readHidden('Client secret (Enter if it has none): ')
+    if (secret) await vault.set(config.name, 'HYPERLINK_SECRET_OAUTH_CLIENT_SECRET', secret)
+  }
+  const started = await signInConnector(config, vault).catch(error => fail(error instanceof Error ? error.message : String(error)))
+  openInBrowser(started.url)
+  console.log(`Sign in in your browser (it opened; if not, open this):\n${started.url}\nWaiting up to ${SIGN_IN_WAIT_MS / 60_000} minutes…`)
+  await started.finished.catch(error => fail(error instanceof Error ? error.message : String(error)))
+  console.log(`Signed in to ${config.name}. A running Hyperlink starts it again with the sign-in.`)
+  process.exit(0)
+}
+
+/** hyperlink ready: the connectors that come with Hyperlink; ready add <name> shows its permit card and adds it on his yes. */
+async function ready(args: string[]): Promise<void> {
+  const [action, name] = args
+  const home = hyperlinkHome()
+  if (action !== 'add') {
+    const installed = new Set((await readConnectors(home)).map(entry => entry.name))
+    for (const entry of await readyConnectors()) console.log(`${entry.name}${installed.has(entry.name) ? ' (added)' : ''}  ${entry.permit?.description ?? entry.problem ?? ''}`)
+    return
+  }
+  const entry = (await readyConnectors()).find(item => item.name === name)
+  if (!entry?.permit) return fail(entry ? `${entry.name} did not start: ${entry.problem ?? ''}` : `There is no ready connector named "${name ?? ''}".`)
+  printCard(entry.permit, { permit: entry.permit, tests: [], problem: null })
+  if (!args.includes('--yes')) {
+    const answer = await createInterface({ input: process.stdin, output: process.stdout }).question('Add it? [y/N] ')
+    if (!/^y(es)?$/iu.test(answer.trim())) return console.log('Not added.')
+  }
+  const config = await installReady(entry.name, home)
+  console.log(`Added ${config.name}.${config.signIn ? ` Sign in once: hyperlink signin ${config.name}` : ''}`)
+  process.exit(0)
 }
 
 /** A line read without showing it (or the whole of stdin, when it is piped in). */

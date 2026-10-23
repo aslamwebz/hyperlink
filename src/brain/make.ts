@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -173,4 +173,25 @@ export async function replaceConnector(name: string, id: string, permit: Permit,
   const next: MadeConfig = { ...config, ...(Object.keys(env).length ? { env } : {}), reaches: permit.reaches, ...(permit.signIn ? { signIn: permit.signIn } : {}), permit: keptPermit(permit), repairedAt: new Date().toISOString() }
   await writeConnectors(connectors.map(entry => entry.name === name ? next : entry), home)
   return next
+}
+
+/** Connectors that come with Hyperlink, written and checked by hand (a sign-in app's, which the brain cannot test before he signs in). */
+const READY_FOLDER = join(PACKAGE_ROOT, 'ready')
+
+/** The ready connectors, each with the permit it shows (read from its handshake in the sandbox; no tool is run). */
+export async function readyConnectors(): Promise<{ readonly name: string; readonly permit: Permit | null; readonly problem: string | null }[]> {
+  const files = (await readdir(READY_FOLDER).catch(() => [] as string[])).filter(file => /^[a-z0-9-]+\.ts$/u.test(file)).sort()
+  return Promise.all(files.map(async file => {
+    const report = await testConnector(join(READY_FOLDER, file), { examples: false })
+    return { name: file.replace(/\.ts$/u, ''), permit: report.permit, problem: report.problem }
+  }))
+}
+
+/** He said yes to a ready connector: a copy of it joins the list, in a folder of its own. */
+export async function installReady(name: string, home: string): Promise<ConnectorConfig> {
+  if (!/^[a-z0-9-]{1,32}$/u.test(name)) throw new Error('There is no ready connector of that name.')
+  const file = join(READY_FOLDER, `${name}.ts`)
+  const report = await testConnector(file, { examples: false })
+  if (!report.permit) throw new Error(`The ready connector ${name} did not start: ${report.problem ?? 'no answer'}`)
+  return installFile(file, report.permit, home, 'copy')
 }
