@@ -69,6 +69,24 @@ hyperlink secret list                       # names only; values are never shown
 - **Each connector gets its own keys and no one else's,** when it starts; nothing it inherits from Hyperlink's environment looks like a key. Change a key and the connector starts again with it.
 - **The brain never sees a secret.** A made connector declares the keys it needs; they reach it at run time, never its code.
 
+## Sign-in: apps that need you to log in once
+
+Some apps (Gmail, Google Calendar, most "Sign in with…" APIs) need you to sign in rather than give a key. A connector can declare its sign-in (OAuth 2), and Hyperlink does the rest:
+
+```sh
+hyperlink ready add gmail     # a connector that comes with Hyperlink: its permit card, then your yes
+hyperlink signin gmail        # your app's client ID once, then the app's own sign-in page in your browser
+```
+
+- **Your password goes only to the app's page.** Hyperlink listens on this machine for the answer (an authorization code with PKCE) and keeps the refresh token it ends with in the vault.
+- **Every call gets a fresh access token,** renewed as it runs out; the connector never sees your password or the refresh token's use beyond its own app.
+- **Until you sign in it still starts,** and its tools answer with a sentence saying you have to; the status says the sign-in is needed.
+- **The permit card shows where it signs in and what it asks for;** a repair that asks for more needs your yes.
+
+The client ID is your own app's, made once in the app's developer console (for Google: a project with the Gmail API on, and an OAuth client of the kind "Desktop app"). It is kept in the vault like any key.
+
+**Gmail** (`ready/gmail.ts`) uses Google's Gmail API, no browser: search with Gmail's own search words, read a message or a whole thread, list labels, send or reply, save a draft, and change labels (mark read, archive, star). It asks for `gmail.modify`, which reads, sends and labels mail but cannot delete it for good.
+
 ## Where it is going
 
 - **Links:** "when this happens in A, do that in B", planned by the brain from a sentence, then running with no AI at all.
@@ -97,6 +115,8 @@ Point any MCP client at `http://127.0.0.1:7466/mcp` with the header `Authorizati
 | `hyperlink secret set <connector> <NAME>` | keep a key in the vault |
 | `hyperlink secret list [connector]` | the keys kept (names only) |
 | `hyperlink secret remove <connector> <NAME>` | forget one |
+| `hyperlink signin <connector>` | sign in to its app once, in your browser (OAuth); kept in the vault |
+| `hyperlink ready [add <name>] [--yes]` | the connectors that come with Hyperlink; add one |
 
 ## Built with
 

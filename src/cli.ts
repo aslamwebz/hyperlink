@@ -325,7 +325,8 @@ async function ready(args: string[]): Promise<void> {
   if (action !== 'add') {
     const installed = new Set((await readConnectors(home)).map(entry => entry.name))
     for (const entry of await readyConnectors()) console.log(`${entry.name}${installed.has(entry.name) ? ' (added)' : ''}  ${entry.permit?.description ?? entry.problem ?? ''}`)
-    return
+    // The sandboxed processes that showed their permits may linger a moment; nothing is left to do.
+    process.exit(0)
   }
   const entry = (await readyConnectors()).find(item => item.name === name)
   if (!entry?.permit) return fail(entry ? `${entry.name} did not start: ${entry.problem ?? ''}` : `There is no ready connector named "${name ?? ''}".`)
