@@ -2,7 +2,7 @@
  * The status page: the connectors around the hub and the calls passing through.
  * The full map (links as lit lines, the brain as the orb) grows from this.
  */
-export function statusPage(token: string): string {
+export function statusPage(): string {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hyperlink</title>
@@ -21,7 +21,10 @@ small{color:var(--muted)}code{color:var(--accent)}
 <main><section><h2>Connectors</h2><div id="connectors"><small>Loading…</small></div></section>
 <section><h2>Activity</h2><div id="activity"><small>Nothing has passed through yet.</small></div></section></main>
 <script>
-const token=${JSON.stringify(token)};const get=p=>fetch(p,{headers:{authorization:'Bearer '+token}}).then(r=>r.json());
+// The token is never in the page: it comes in the address after # (never sent to the server), or is asked for once.
+let token=new URLSearchParams(location.hash.slice(1)).get('token')||sessionStorage.getItem('hyperlink-token')||prompt('Hyperlink token (the file "token" in the Hyperlink folder)')||'';
+if(token){sessionStorage.setItem('hyperlink-token',token);if(location.hash)history.replaceState(null,'',location.pathname)}
+const get=p=>fetch(p,{headers:{authorization:'Bearer '+token}}).then(r=>r.json());
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function draw(){try{const s=await get('/api/status');document.getElementById('sum').textContent=s.connectors.length+' connectors · '+s.tools+' tools';
 document.getElementById('connectors').innerHTML=s.connectors.length?s.connectors.map(c=>'<div class="row"><span><span class="dot '+c.state+'"></span>'+esc(c.name)+' <small>'+c.kind+'</small></span><small>'+(c.problem?esc(c.problem):c.state+' · '+c.tools+' tools')+'</small></div>').join(''):'<small>No connectors yet. Add one: <code>hyperlink add &lt;name&gt; -- &lt;command&gt;</code></small>';
