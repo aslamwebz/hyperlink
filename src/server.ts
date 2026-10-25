@@ -57,7 +57,8 @@ export function startServer(options: { readonly hub: Hub; readonly token: string
 
     if (url.pathname === '/' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' })
-      res.end(statusPage(token))
+      // The page carries no token: anything that can open it learns nothing from it.
+      res.end(statusPage())
       return
     }
     if (!authorised(req.headers.authorization, token)) return send(res, 401, { error: 'Missing or wrong token (Authorization: Bearer <token>; it is in the Hyperlink folder).' })
