@@ -13,7 +13,8 @@ type Part = { mimeType?: string; filename?: string; body?: { data?: string; size
 type Message = { id: string; threadId: string; labelIds?: string[]; snippet?: string; payload?: Part }
 type Context = { fetch: (url: string, init?: RequestInit) => Promise<Response>; accessToken: () => Promise<string> }
 
-async function call(context: Context, path: string, init: RequestInit = {}): Promise<any> {
+/** One Gmail API call; T is the shape of its answer, as Google documents it. */
+async function call<T>(context: Context, path: string, init: RequestInit = {}): Promise<T> {
   const token = await context.accessToken()
   const response = await context.fetch(API + path, { ...init, headers: { authorization: 'Bearer ' + token, accept: 'application/json', ...(init.body ? { 'content-type': 'application/json' } : {}) } })
   const text = await response.text()
@@ -22,7 +23,7 @@ async function call(context: Context, path: string, init: RequestInit = {}): Pro
     try { reason = JSON.parse(text).error?.message ?? reason } catch { /* not JSON */ }
     throw new Error('Gmail answered ' + response.status + ': ' + reason)
   }
-  return text ? JSON.parse(text) : {}
+  return (text ? JSON.parse(text) : {}) as T
 }
 
 function header(part: Part | undefined, name: string): string {
@@ -102,7 +103,7 @@ async function compose(context: Context, args: Record<string, unknown>): Promise
   const headers: string[] = []
   let threadId: string | undefined
   if (args.reply_to_message_id) {
-    const original: Message = await call(context, '/messages/' + encodeURIComponent(String(args.reply_to_message_id)) + '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Reply-To')
+    const original = await call<Message>(context, '/messages/' + encodeURIComponent(String(args.reply_to_message_id)) + '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Reply-To')
     const id = header(original.payload, 'Message-ID')
     if (id) headers.push('In-Reply-To: ' + id, 'References: ' + (header(original.payload, 'References') + ' ' + id).trim())
     if (!subject) subject = /^re:/i.test(header(original.payload, 'Subject')) ? header(original.payload, 'Subject') : 'Re: ' + header(original.payload, 'Subject')
@@ -153,10 +154,10 @@ export default {
       example: { query: 'in:inbox', max: 3 },
       run: async (args: Record<string, unknown>, context: Context) => {
         const max = Math.max(1, Math.min(20, Number(args.max) || 10))
-        const found = await call(context, '/messages?maxResults=' + max + (args.query ? '&q=' + encodeURIComponent(String(args.query)) : ''))
+        const found = await call<{ messages?: { id: string }[]; nextPageToken?: string }>(context, '/messages?maxResults=' + max + (args.query ? '&q=' + encodeURIComponent(String(args.query)) : ''))
         const ids: { id: string }[] = found.messages ?? []
         if (ids.length === 0) return { messages: [], note: 'No message matches.' }
-        const messages: Message[] = await Promise.all(ids.map(entry => call(context, '/messages/' + entry.id + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date')))
+        const messages: Message[] = await Promise.all(ids.map(entry => call<Message>(context, '/messages/' + entry.id + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date')))
         return { messages: messages.map(summary), more: Boolean(found.nextPageToken) }
       },
     },
@@ -164,14 +165,14 @@ export default {
       name: 'read_message',
       description: 'Reads one message in full: sender, recipients, subject, date, labels, attachment names and its text.',
       input: { type: 'object', properties: { id: { type: 'string', description: 'The message id (from search_messages).' } }, required: ['id'] },
-      run: async (args: Record<string, unknown>, context: Context) => full(await call(context, '/messages/' + encodeURIComponent(String(args.id)) + '?format=full')),
+      run: async (args: Record<string, unknown>, context: Context) => full(await call<Message>(context, '/messages/' + encodeURIComponent(String(args.id)) + '?format=full')),
     },
     {
       name: 'read_thread',
       description: 'Reads a whole conversation, oldest message first, each with its sender, date and text.',
       input: { type: 'object', properties: { thread_id: { type: 'string', description: 'The thread id (from search_messages).' } }, required: ['thread_id'] },
       run: async (args: Record<string, unknown>, context: Context) => {
-        const thread = await call(context, '/threads/' + encodeURIComponent(String(args.thread_id)) + '?format=full')
+        const thread = await call<{ id: string; messages?: Message[] }>(context, '/threads/' + encodeURIComponent(String(args.thread_id)) + '?format=full')
         return { thread_id: thread.id, messages: (thread.messages ?? []).map(full) }
       },
     },
@@ -180,7 +181,7 @@ export default {
       description: 'The mailbox\'s labels (system ones like INBOX, UNREAD, STARRED, and its own), with their ids.',
       input: { type: 'object', properties: {} },
       example: {},
-      run: async (_args: Record<string, unknown>, context: Context) => ((await call(context, '/labels')).labels ?? []).map((label: { id: string; name: string; type: string }) => ({ id: label.id, name: label.name, type: label.type })),
+      run: async (_args: Record<string, unknown>, context: Context) => ((await call<{ labels?: { id: string; name: string; type: string }[] }>(context, '/labels')).labels ?? []).map(label => ({ id: label.id, name: label.name, type: label.type })),
     },
     {
       name: 'send_message',
@@ -188,7 +189,7 @@ export default {
       input: { type: 'object', properties: messageArgs, required: ['body'] },
       changes: true,
       run: async (args: Record<string, unknown>, context: Context) => {
-        const sent = await call(context, '/messages/send', { method: 'POST', body: JSON.stringify(await compose(context, args)) })
+        const sent = await call<{ id: string; threadId: string }>(context, '/messages/send', { method: 'POST', body: JSON.stringify(await compose(context, args)) })
         return { sent: true, id: sent.id, thread_id: sent.threadId }
       },
     },
@@ -198,7 +199,7 @@ export default {
       input: { type: 'object', properties: messageArgs, required: ['body'] },
       changes: true,
       run: async (args: Record<string, unknown>, context: Context) => {
-        const draft = await call(context, '/drafts', { method: 'POST', body: JSON.stringify({ message: await compose(context, args) }) })
+        const draft = await call<{ id: string; message?: { id: string } }>(context, '/drafts', { method: 'POST', body: JSON.stringify({ message: await compose(context, args) }) })
         return { drafted: true, draft_id: draft.id, id: draft.message?.id }
       },
     },
@@ -209,7 +210,7 @@ export default {
       changes: true,
       run: async (args: Record<string, unknown>, context: Context) => {
         const list = (value: unknown) => Array.isArray(value) ? value.map(String) : []
-        const changed: Message = await call(context, '/messages/' + encodeURIComponent(String(args.id)) + '/modify', { method: 'POST', body: JSON.stringify({ addLabelIds: list(args.add), removeLabelIds: list(args.remove) }) })
+        const changed = await call<Message>(context, '/messages/' + encodeURIComponent(String(args.id)) + '/modify', { method: 'POST', body: JSON.stringify({ addLabelIds: list(args.add), removeLabelIds: list(args.remove) }) })
         return { id: changed.id, labels: changed.labelIds ?? [] }
       },
     },

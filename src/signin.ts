@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, type ServerResponse } from 'node:http'
 import type { ConnectorConfig } from './config.js'
 import type { SignIn } from './kit.js'
 import type { Vault } from './vault.js'
@@ -85,7 +85,7 @@ export function openInBrowser(url: string): void {
   execFile(file, args, { windowsHide: true }, () => {})
 }
 
-function page(res: import('node:http').ServerResponse, ok: boolean, text: string): void {
+function page(res: ServerResponse, ok: boolean, text: string): void {
   const safe = text.replace(/[&<>"]/gu, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char] ?? char)
   res.writeHead(ok ? 200 : 400, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
   res.end(`<!doctype html><meta charset="utf-8"><title>Hyperlink</title><body style="font:16px system-ui;background:#111;color:#eee;display:grid;place-items:center;height:90vh"><p>${safe}</p></body>`)
