@@ -155,7 +155,7 @@ export async function runConnector(file: string): Promise<void> {
   // Its permit facts travel in the handshake, so Hyperlink learns them without loading its code.
   const server = new Server({ name: definition.name, version: '1' }, { capabilities: { tools: {} }, instructions: JSON.stringify({ description: definition.description, reaches: definition.reaches, secrets: definition.secrets ?? [], ...(definition.signIn ? { signIn: definition.signIn } : {}), examples: Object.fromEntries(definition.tools.filter(tool => !tool.changes && tool.example && typeof tool.example === 'object').map(tool => [tool.name, tool.example])) }) })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: definition.tools.map(tool => ({ name: tool.name, description: `${tool.description}${tool.changes ? ' (changes something)' : ''}`, inputSchema: tool.input as { type: 'object' } })),
+    tools: definition.tools.map(tool => ({ name: tool.name, description: `${tool.description}${tool.changes ? ' (changes something)' : ''}`, inputSchema: tool.input as { type: 'object' }, annotations: { readOnlyHint: !tool.changes } })),
   }))
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const tool = definition.tools.find(entry => entry.name === request.params.name)
